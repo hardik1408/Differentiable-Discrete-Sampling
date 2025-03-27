@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 import math
 import matplotlib.pyplot as plt
-
-class Categorical(torch.autograd.Function):
+from torch.distributions import Categorical
+class myCategorical(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p):
         if p.dim() == 1:
@@ -32,14 +32,15 @@ def generate_long_baseline(total_steps=100, p_param=20.0, num_simulations=1000, 
     final_positions = torch.zeros(num_simulations, device=device)
     
     torch.manual_seed(42)
+    theta = 20.0
     for sim in range(num_simulations):
         x = 0.0
         for step in range(total_steps):
-            q = math.exp(-x / p_param)
+            q = math.exp(-(x + theta) / p_param)
             q = min(max(q, 1e-6), 1.0)
             sample = torch.bernoulli(torch.tensor([q], device=device)).item()
             action = 1 if sample == 1.0 else -1
-            if x == 0 and action == -1:
+            if x + theta == 0 and action == -1:
                 action = 1
             x += action
             full_trajectories[sim, step] = x
@@ -64,11 +65,11 @@ def simulate_full_trajectory(theta, num_steps=100, p_param=20.0,
     
     for step in range(num_steps):
         # print(estimator)
-        q = torch.exp(-(x.detach() + theta) / p_param).clamp(1e-6, 1.0-1e-6)
+        q = torch.exp(-(x + theta) / p_param).clamp(1e-6, 1.0-1e-6)
         prob = torch.cat([q, 1.0 - q]).view(1, -1)
         
         if estimator == 'categorical':
-            sample = Categorical.apply(prob)  
+            sample = myCategorical.apply(prob)  
             move = 1 - 2 * sample  # If sample==0, move=+1; if sample==1, move=-1.
             move = move.squeeze()  #
         elif estimator == 'gumbel':
@@ -81,7 +82,7 @@ def simulate_full_trajectory(theta, num_steps=100, p_param=20.0,
         # print(move.shape)
         # move = torch.where(x < 1e-6, torch.tensor(1.0, device=device), move)
         # print(x.shape, move.shape)
-        if x == 0 and move == -1:
+        if x + theta == 0 and move == -1:
             move = 1
         x += move
         trajectory[step] = x
@@ -92,13 +93,13 @@ def simulate_full_trajectory(theta, num_steps=100, p_param=20.0,
 # Training and Evaluation Loop
 # -------------------------------
 def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=100, 
-                            lr=0.001, num_simulations=10, device='cpu'):
+                            lr=0.01, num_simulations=10, device='cpu'):
     """Full training and evaluation workflow"""
     # Unpack baseline statistics
     (train_mean, train_var, 
      test_mean, test_var) = baseline_stats
     
-    theta = torch.tensor([0.0], device=device, requires_grad=True)
+    theta = torch.tensor([20.0], device=device, requires_grad=True)
     optimizer = optim.Adam([theta], lr=lr)
     
     train_losses = []
@@ -117,7 +118,7 @@ def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=100,
             # print(train_loss)
             test_loss = F.mse_loss(traj[len(train_mean):], test_mean)
             
-            train_loss.backward(retain_graph=True)
+            train_loss.backward()
             
             epoch_train_loss += train_loss.item()
             epoch_test_loss += test_loss.item()
@@ -154,7 +155,7 @@ def evaluate_model(theta, estimator_type, baseline_data, num_samples=1000, devic
     
     return {
         'wasserstein': wasserstein_distance(sim_final, base_final),
-        'mean_absolute_error': F.l1_loss(sim_final.mean(), base_final.mean()),
+        'mean_absolute_error': F.mse_loss(sim_final.mean(), base_final.mean()),
         'variance_ratio': sim_final.var() / base_final.var()
     }
 # -------------------------------
@@ -191,7 +192,6 @@ if __name__ == "__main__":
         print(f"  - Mean Absolute Error: {results[est]['mean_absolute_error']:.4f}")
         print(f"  - Variance Ratio: {results[est]['variance_ratio']:.4f}")
         print(f"  - Final Theta: {results[est]['theta'][-1]:.4f}\n")    
-        print("\nFinal Evaluation:")
 
     plt.figure(figsize=(12, 6))
     for estimator in results:
