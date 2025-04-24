@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-# === Added custom estimator ===
 class Categorical(torch.autograd.Function):
     generate_vmap_rule = True  # for functorch if needed
 
@@ -29,19 +28,12 @@ class Categorical(torch.autograd.Function):
         return grad_output_expanded * ws
 
 def custom_categorical(p):
-    """
-    Sample from a categorical distribution represented by p using the custom estimator,
-    and return a one-hot vector.
-    """
-    original_shape = p.shape  # e.g., (B, N, k)
+
+    original_shape = p.shape  
     k = p.shape[-1]
-    # Flatten p to a 2D tensor of shape (num_samples, k)
     p_flat = p.contiguous().view(-1, k)
-    # Use your unchanged estimator on the flattened tensor
-    sample_flat = Categorical.apply(p_flat)  # shape: (num_samples, 1)
-    # Reshape the sample back to the original shape with an extra singleton dimension at the end
+    sample_flat = Categorical.apply(p_flat)  
     sample = sample_flat.view(*original_shape[:-1], 1)
-    # Create a one-hot tensor using the sampled indices
     one_hot = torch.zeros_like(p)
     one_hot.scatter_(-1, sample, 1.0)
     return one_hot
