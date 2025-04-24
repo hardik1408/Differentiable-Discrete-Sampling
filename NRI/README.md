@@ -6,7 +6,7 @@
 - `*_scat` replicate using the Categorical++ method.
 
 Run the following command to simulate the experiment:
-```python
+```bash
 python train.py --epochs 100 --encoder cnn --decoder rnn 
 ```
 Use the train file as per your estimator

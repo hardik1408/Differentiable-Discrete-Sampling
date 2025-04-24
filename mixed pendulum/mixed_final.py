@@ -8,7 +8,7 @@ class Categorical(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, p):
-        # p is assumed to be of shape (..., k) representing a categorical distribution.
+        # p: shape (..., k)
         result = torch.multinomial(p, num_samples=1)  # shape (..., 1)
         ctx.save_for_backward(result, p)
         return result
@@ -18,15 +18,41 @@ class Categorical(torch.autograd.Function):
         result, p = ctx.saved_tensors
         one_hot = torch.zeros_like(p)
         one_hot.scatter_(-1, result, 1.0)
-        eps = 1e-8 # small value to avoid division by zero
-        # For the chosen category, analogous to a "jump-down" weight.
+        eps = 1e-8  # avoid division by zero
+        # Compute approximate gradients:
         w_chosen = (1.0 / (p + eps)) / 2  
-        # For non-chosen categories, analogous to a "jump-up" weight.
         w_non_chosen = (1.0 / (1.0 - p + eps)) / 2  
         ws = one_hot * w_chosen + (1 - one_hot) * w_non_chosen
         grad_output_expanded = grad_output.expand_as(p)
         return grad_output_expanded * ws
+class StochasticCategorical(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, p, uncertainty_in=None):
+        result = torch.multinomial(p, num_samples=1)
+        one_hot = torch.zeros_like(p)
+        one_hot.scatter_(-1, result, 1.0)
+        var_chosen = (1.0 - p) / p
+        var_not_chosen = p / (1.0 - p)
+        op_variance = one_hot * var_chosen + (1 - one_hot) * var_not_chosen
+        if uncertainty_in is not None:
+            uncertainty_out = uncertainty_in + op_variance
+        else:
+            uncertainty_out = op_variance
+        ctx.save_for_backward(result, p, uncertainty_out)
+        return result, uncertainty_out
 
+    @staticmethod
+    def backward(ctx, grad_output, grad_uncertainty=None):
+        result, p, uncertainty = ctx.saved_tensors
+        one_hot = torch.zeros_like(p)
+        one_hot.scatter_(-1, result, 1.0)
+        w_chosen = (1.0 / p) / 2
+        w_non_chosen = (1.0 / (1.0 - p)) / 2
+        confidence = 1.0 / (1.0 + uncertainty.clamp(min=1e-6))
+        adjusted_ws = (one_hot * w_chosen + (1 - one_hot) * w_non_chosen) * confidence
+        adjusted_ws = adjusted_ws / adjusted_ws.mean().clamp(min=1e-10)
+        grad_p = grad_output.expand_as(p) * adjusted_ws
+        return grad_p, None
 # Pendulum system with discrete control actions.
 class DiscreteControlPendulum:
     def __init__(self, dt=0.1, g=9.8, m=1.0, l=1.0, max_torque=5.0, n_controls=3, device="cpu"):
@@ -81,6 +107,21 @@ class DiscreteControlPendulum:
         log_prob = torch.log(probs[control_idx] + 1e-8)
         return control_idx, log_prob
 
+    def sample_control_cat(self, state, policy_params, tau=1.0):
+        """
+        Uses the Gumbel-Softmax estimator (with straight-through sampling).
+        """
+        logits = self.compute_control_probs(state, policy_params)
+        # PyTorch has a built-in implementation for gumbel softmax.
+        # gumbel_samples = torch.nn.functional.gumbel_softmax(logits, tau=tau, hard=True, dim=0)
+        # control_idx = torch.argmax(gumbel_samples).item()
+        # # We compute log probability from the softmax probabilities
+        # probs = torch.softmax(logits, dim=0)
+        sample, _ = StochasticCategorical.apply(logits.unsqueeze(0), None)
+        control_idx = sample.item()
+        log_prob = torch.log(logits[control_idx] + 1e-8)
+        return control_idx, log_prob
+    
     def sample_control_gumbel(self, state, policy_params, tau=1.0):
         """
         Uses the Gumbel-Softmax estimator (with straight-through sampling).
@@ -99,7 +140,9 @@ class DiscreteControlPendulum:
         Samples a discrete control action and returns both the control index and the differentiable log probability.
         method: "custom" (default) or "gumbel"
         """
-        if method == "gumbel":
+        if method == "cat++":
+            return self.sample_control_cat(state, policy_params, tau)
+        elif method == "gumbel":
             return self.sample_control_gumbel(state, policy_params, tau)
         else:
             return self.sample_control_custom(state, policy_params)
@@ -182,8 +225,8 @@ def optimize_pendulum_policy(pendulum, n_episodes=100, lr=0.01, estimator_method
 
 # Benchmark routine that compares both estimators.
 def benchmark(n_controls_list, n_episodes=100, n_runs=4, lr=0.01, tau=1.0, device="cpu"):
-    all_results = {"categorical": {}, "gumbel": {}}
-    for method in ["categorical", "gumbel"]:
+    all_results = {"categorical": {}, "cat++": {}, "gumbel": {}}
+    for method in [ "cat++","categorical","gumbel"]:
         print(f"\nBenchmarking using the {method} estimator:")
         for n_controls in n_controls_list:
             print(f"  n_controls = {n_controls}:")
@@ -206,14 +249,14 @@ def benchmark(n_controls_list, n_episodes=100, n_runs=4, lr=0.01, tau=1.0, devic
                 run_rewards.append(final_reward)
                 run_times.append(elapsed)
                 print(f"Final Reward = {final_reward:.2f}, Time = {elapsed:.2f} sec")
-                plt.figure(figsize=(8, 5))
-                plt.plot(rewards_history)
-                plt.xlabel("Episode")
-                plt.ylabel("Total Reward")
-                plt.title(f"Estimator: {method}, n_controls={n_controls}, Run {run+1}")
-                plt.grid(True)
-                plt.show()
-                plt.close()
+                # plt.figure(figsize=(8, 5))
+                # plt.plot(rewards_history)
+                # plt.xlabel("Episode")
+                # plt.ylabel("Total Reward")
+                # plt.title(f"Estimator: {method}, n_controls={n_controls}, Run {run+1}")
+                # plt.grid(True)
+                # plt.show()
+                # plt.close()
 
             avg_reward = np.mean(run_rewards)
             avg_time = np.mean(run_times)
