@@ -16,3 +16,5 @@ To run the code, use the following command:
 ```bash
 python mixed_final.py
 ```
+
+> Code to produce plots of reward function vs episodes is commented out. can be uncommented to visualize the results.

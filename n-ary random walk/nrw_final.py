@@ -39,7 +39,46 @@ class myCategorical(torch.autograd.Function):
         grad_p = grad_output * weights
         return grad_p
 
-
+class StochasticCategorical(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, p, uncertainty_in=None):
+        # Sample using multinomial
+        result = torch.multinomial(p, num_samples=1)
+        
+        # Create one-hot encoding
+        one_hot = torch.zeros_like(p)
+        one_hot.scatter_(-1, result, 1.0)
+        
+        # Calculate variance for uncertainty propagation
+        var_chosen = (1.0 - p) / p.clamp(min=1e-6)
+        var_not_chosen = p / (1.0 - p).clamp(min=1e-6)
+        op_variance = one_hot * var_chosen + (1 - one_hot) * var_not_chosen
+        
+        if uncertainty_in is not None:
+            uncertainty_out = uncertainty_in + op_variance
+        else:
+            uncertainty_out = op_variance
+            
+        # Save tensors for backward
+        ctx.save_for_backward(one_hot, p, uncertainty_out)
+        
+        # Return the one-hot vector instead of indices to maintain gradients
+        return one_hot, uncertainty_out
+    
+    @staticmethod
+    def backward(ctx, grad_output, grad_uncertainty=None):
+        one_hot, p, uncertainty = ctx.saved_tensors
+        
+        w_chosen = (1.0 / p.clamp(min=1e-6)) / 2
+        w_non_chosen = (1.0 / (1.0 - p).clamp(min=1e-6)) / 2
+        confidence = 1.0 / (1.0 + uncertainty.clamp(min=1e-6))
+        
+        adjusted_ws = (one_hot * w_chosen + (1 - one_hot) * w_non_chosen) * confidence
+        adjusted_ws = adjusted_ws / adjusted_ws.mean().clamp(min=1e-10)
+        
+        grad_p = grad_output * adjusted_ws
+        
+        return grad_p, None
 # -------------------------------
 # Baseline Random Walk 
 # -------------------------------
@@ -114,7 +153,8 @@ def simulate_full_trajectory(theta, num_steps=1000, p_param=20.0,
             sample = F.gumbel_softmax(torch.log(prob), tau=tau, hard=True)
             move = (sample @ moves.view(-1, 1)).squeeze()
         else:
-            raise ValueError("Unknown estimator type.")
+            sample,_ = StochasticCategorical.apply(prob)
+            move = (sample @ moves.view(-1, 1)).squeeze()
         
         x = x + move
         # print(x)
@@ -127,13 +167,13 @@ def simulate_full_trajectory(theta, num_steps=1000, p_param=20.0,
 # -------------------------------
 # Training and Evaluation Loop
 # -------------------------------
-def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=2, 
+def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=10, 
                             lr=0.01, num_simulations=10, device='cpu'):
     """Full training and evaluation workflow"""
     # Unpack baseline statistics (ignoring variances for now)
     (train_mean, _, test_mean, _) = baseline_stats
     
-    theta = torch.tensor([10.0], device=device, requires_grad=True)
+    theta = torch.tensor([20.0], device=device, requires_grad=True)
     optimizer = optim.Adam([theta], lr=lr)
     
     train_losses = []
@@ -203,52 +243,61 @@ if __name__ == "__main__":
     
     results = {}
     final_thetas = {}
-    for estimator in ['categorical', 'gumbel']:
+    for estimator in ['cat++','categorical', 'gumbel']:
         print(f"training {estimator}")
         train_loss, test_loss, theta_hist = train_evaluate_estimator(
             estimator, 
             (baseline_data['train_mean'], None, baseline_data['test_mean'], None),
             device=device
         )
-        
+        print("train loss",sum(train_loss)/len(train_loss))
+        print("test loss",sum(test_loss)/len(test_loss))
+        print(min(test_loss))
         final_theta = torch.tensor([theta_hist[-1]], device=device)
         final_thetas[estimator] = final_theta
-        metrics = evaluate_model(final_theta, estimator, baseline_data, device=device)
+        print(f"------Estimator: {estimator}------")
+        print(f"average train loss: {sum(train_loss)/len(train_loss)}")
+        print(f"average test loss: {sum(test_loss)/len(test_loss)}")
+        print(f" Minimum Test Loss: {min(test_loss)}")
+        print(f"Final theta: {final_theta.item()}")
+        print("-------------------------")
+
+    #     metrics = evaluate_model(final_theta, estimator, baseline_data, device=device)
         
-        results[estimator] = {
-            'train_loss': train_loss,
-            'test_loss': test_loss,
-            'theta': theta_hist,
-            **metrics
-        }
+    #     results[estimator] = {
+    #         'train_loss': train_loss,
+    #         'test_loss': test_loss,
+    #         'theta': theta_hist,
+    #         **metrics
+    #     }
     
-    # Display final benchmark results.
-    print("\nFinal Benchmark Results:")
-    for est in results:
-        print(f"{est.upper()} Estimator:")
-        print(f"  - Wasserstein Distance: {results[est]['wasserstein']:.4f}")
-        print(f"  - Mean Absolute Error: {results[est]['mean_absolute_error']:.4f}")
-        print(f"  - Variance Ratio: {results[est]['variance_ratio']:.4f}")
-        print(f"  - Final Theta: {results[est]['theta'][-1]:.4f}\n")
+    # # Display final benchmark results.
+    # print("\nFinal Benchmark Results:")
+    # for est in results:
+    #     print(f"{est.upper()} Estimator:")
+    #     print(f"  - Wasserstein Distance: {results[est]['wasserstein']:.4f}")
+    #     print(f"  - Mean Absolute Error: {results[est]['mean_absolute_error']:.4f}")
+    #     print(f"  - Variance Ratio: {results[est]['variance_ratio']:.4f}")
+    #     print(f"  - Final Theta: {results[est]['theta'][-1]:.4f}\n")
     
-    # -------------------------------
-    # Plot trajectories for comparison
-    # -------------------------------
-    # Use the baseline average trajectory
-    baseline_mean = baseline_data['baseline_mean'].cpu().numpy()
-    steps = range(len(baseline_mean))
+    # # -------------------------------
+    # # Plot trajectories for comparison
+    # # -------------------------------
+    # # Use the baseline average trajectory
+    # baseline_mean = baseline_data['baseline_mean'].cpu().numpy()
+    # steps = range(len(baseline_mean))
     
-    # Simulate one trajectory using the final theta for each estimator.
-    categorical_traj = simulate_full_trajectory(final_thetas['categorical'], device=device, estimator='categorical').detach().cpu().numpy()
-    gumbel_traj = simulate_full_trajectory(final_thetas['gumbel'], device=device, estimator='gumbel').detach().cpu().numpy()
-    baseline_traj = baseline_data['full_trajectories'][0].cpu().numpy()
-    plt.figure(figsize=(10, 6))
-    plt.plot(steps, baseline_traj, label="Baseline Trajectory", linewidth=2)
-    plt.plot(steps, categorical_traj, label="Categorical Trajectory", linestyle="--")
-    plt.plot(steps, gumbel_traj, label="Gumbel Trajectory", linestyle=":")
-    plt.xlabel("Step")
-    plt.ylabel("Position")
-    plt.title("Comparison of 1000-Step Random Walk Trajectories")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("random_walk_comparison.png")
+    # # Simulate one trajectory using the final theta for each estimator.
+    # categorical_traj = simulate_full_trajectory(final_thetas['categorical'], device=device, estimator='categorical').detach().cpu().numpy()
+    # gumbel_traj = simulate_full_trajectory(final_thetas['gumbel'], device=device, estimator='gumbel').detach().cpu().numpy()
+    # baseline_traj = baseline_data['full_trajectories'][0].cpu().numpy()
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(steps, baseline_traj, label="Baseline Trajectory", linewidth=2)
+    # plt.plot(steps, categorical_traj, label="Categorical Trajectory", linestyle="--")
+    # plt.plot(steps, gumbel_traj, label="Gumbel Trajectory", linestyle=":")
+    # plt.xlabel("Step")
+    # plt.ylabel("Position")
+    # plt.title("Comparison of 1000-Step Random Walk Trajectories")
+    # plt.legend()
+    # plt.grid(True)
+    # plt.savefig("random_walk_comparison.png")

@@ -5,101 +5,135 @@ import torch.optim as optim
 import math
 import matplotlib.pyplot as plt
 from torch.distributions import Categorical
+
 class myCategorical(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p):
+        # ensure p is [batch, n_choices]
         if p.dim() == 1:
             p = p.unsqueeze(0)
-        result = torch.multinomial(p, num_samples=1)
-        ctx.save_for_backward(result, p)
-        return result.float()
+
+        # sample an index (long tensor)
+        idx = torch.multinomial(p, num_samples=1)         # dtype=torch.int64
+        # build one-hot from idx
+        one_hot = torch.zeros_like(p).scatter_(1, idx, 1.0)
+
+        # save the index and the original probabilities
+        ctx.save_for_backward(idx, p)
+        return one_hot
 
     @staticmethod
     def backward(ctx, grad_output):
-        result, p = ctx.saved_tensors
-        one_hot = torch.zeros_like(p)
-        one_hot.scatter_(1, result, 1.0)
+        idx, p = ctx.saved_tensors   # idx is int64, p is float
+        # rebuild one-hot
+        one_hot = torch.zeros_like(p).scatter_(1, idx, 1.0)
+
+        # clamp to avoid division by zero
         p_safe = p.clamp(min=1e-6, max=1.0-1e-6)
-        weights = one_hot * (1/(2*p_safe)) + (1-one_hot)*(1/(2*(1-p_safe)))
-        return grad_output.expand_as(p) * weights
+
+        # REINFORCE‑style weights: ∇ₚ log p_i = 1/p_i  if i was chosen, else 0
+        # but you had a symmetric form; here’s one common choice:
+        weights = one_hot * (1.0 / p_safe)
+
+        # multiply by incoming gradient
+        grad_p = grad_output * weights
+        return grad_p
+
 
 # -------------------------------
 # Baseline Random Walk 
 # -------------------------------
-def generate_long_baseline(total_steps=100, p_param=20.0, num_simulations=1000, device='cuda'):
-    """Generate baseline trajectories with full position tracking"""
+def generate_long_baseline(total_steps=1000, p_param=20.0, n_choices=5, num_simulations=1000, device='cuda'):
+    """Generate baseline trajectories with full position tracking (n-ary random walk with multinomial sampling)"""
     full_trajectories = torch.zeros((num_simulations, total_steps), device=device)
     final_positions = torch.zeros(num_simulations, device=device)
     
     torch.manual_seed(42)
     theta = 20.0
-    for sim in range(num_simulations):
-        x = 0.0
-        for step in range(total_steps):
-            q = math.exp(-(x + theta) / p_param)
-            q = min(max(q, 1e-6), 1.0)
-            sample = torch.bernoulli(torch.tensor([q], device=device)).item()
-            action = 1 if sample == 1.0 else -1
-            if x + theta == 0 and action == -1:
-                action = 1
-            x += action
-            full_trajectories[sim, step] = x
-        final_positions[sim] = x
+
+    # Define possible moves
+    if n_choices % 2 == 1:
+        moves = torch.arange(-(n_choices//2), n_choices//2 + 1, device=device, dtype=torch.float32)
+    else:
+        moves = torch.arange(-(n_choices-1)/2, n_choices/2 + 0.1, 1.0, device=device)
     
+    for sim in range(num_simulations):
+        x = torch.tensor(0.0, device=device)
+        for step in range(total_steps):
+            # Compute move probabilities
+            probs = torch.exp(-(torch.abs(x + moves) - torch.abs(x) + theta) / p_param)
+            probs = probs / probs.sum()
+
+            # Sample move using multinomial
+            one_hot = torch.multinomial(probs, num_samples=1)
+            move = moves[one_hot.squeeze()]
+            
+            x = x + move
+            full_trajectories[sim, step] = x
+        
+        final_positions[sim] = x
+
     split_idx = int(total_steps * 0.7)
     return {
         'train_mean': full_trajectories[:, :split_idx].mean(0),
         'test_mean': full_trajectories[:, split_idx:].mean(0),
+        'baseline_mean': full_trajectories.mean(0),
         'final_positions': final_positions,
         'full_trajectories': full_trajectories
     }
 
+
 # -------------------------------
-# trajectory simulation
+# Trajectory Simulation
 # -------------------------------
-def simulate_full_trajectory(theta, num_steps=100, p_param=20.0, 
-                            device='cpu', estimator='categorical', tau=0.1):
+def simulate_full_trajectory(theta, num_steps=1000, p_param=20.0, 
+                            device='cpu', estimator='categorical', tau=0.1, n_choices=5):
     """Simulate full trajectory with specified estimator"""
     trajectory = torch.zeros(num_steps, device=device)
     x = torch.tensor([0.0], device=device)
-    
+
+    if n_choices % 2 == 1:
+        moves = torch.arange(-(n_choices//2), n_choices//2 + 1, device=device, dtype=torch.float32,requires_grad=True)
+    else:
+        moves = torch.arange(-(n_choices-1)/2, n_choices/2 + 0.1, 1.0, device=device)
+
     for step in range(num_steps):
-        # print(estimator)
-        q = torch.exp(-(x + theta) / p_param).clamp(1e-6, 1.0-1e-6)
-        prob = torch.cat([q, 1.0 - q]).view(1, -1)
+        probs = torch.zeros(n_choices, dtype=torch.float32, device=device)
+        for i in range(n_choices):
+            direction = moves[i]
+            prob_factor = torch.exp(-(torch.abs(x + direction) - torch.abs(x) + theta) / p_param)
+            probs[i] = prob_factor
         
-        if estimator == 'categorical':
-            sample = myCategorical.apply(prob)  
-            move = 1 - 2 * sample  # If sample==0, move=+1; if sample==1, move=-1.
-            move = move.squeeze()  #
+        probs = probs / probs.sum()
+        prob = probs.view(1, -1)  # Shape [1, n_choices]
+        
+        if estimator=='categorical':
+            sample = myCategorical.apply(prob)      # one‐hot [1, n_choices]
+            move   = (sample @ moves.view(-1,1)).squeeze()
         elif estimator == 'gumbel':
             sample = F.gumbel_softmax(torch.log(prob), tau=tau, hard=True)
-            move = 1 - 2 * sample[:, 0]
-            move = move.squeeze()
+            move = (sample @ moves.view(-1, 1)).squeeze()
         else:
             raise ValueError("Unknown estimator type.")
         
-        # print(move.shape)
-        # move = torch.where(x < 1e-6, torch.tensor(1.0, device=device), move)
-        # print(x.shape, move.shape)
-        if x + theta == 0 and move == -1:
-            move = 1
-        x += move
+        x = x + move
+        # print(x)
         trajectory[step] = x
-        
+    # print(trajectory[0])
     return trajectory
+
+
 
 # -------------------------------
 # Training and Evaluation Loop
 # -------------------------------
-def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=5, 
+def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=2, 
                             lr=0.01, num_simulations=10, device='cpu'):
     """Full training and evaluation workflow"""
-    # Unpack baseline statistics
-    (train_mean, train_var, 
-     test_mean, test_var) = baseline_stats
+    # Unpack baseline statistics (ignoring variances for now)
+    (train_mean, _, test_mean, _) = baseline_stats
     
-    theta = torch.tensor([20.0], device=device, requires_grad=True)
+    theta = torch.tensor([10.0], device=device, requires_grad=True)
     optimizer = optim.Adam([theta], lr=lr)
     
     train_losses = []
@@ -113,11 +147,10 @@ def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=5,
         
         for _ in range(num_simulations):
             traj = simulate_full_trajectory(theta, estimator=estimator_type, device=device)
-            
+            # print(traj)
             train_loss = F.mse_loss(traj[:len(train_mean)], train_mean)
-            # print(train_loss)
             test_loss = F.mse_loss(traj[len(train_mean):], test_mean)
-            
+            # print(train_loss)
             train_loss.backward()
             
             epoch_train_loss += train_loss.item()
@@ -125,7 +158,6 @@ def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=5,
         
         optimizer.step()
         
-        # Store metrics
         avg_train_loss = epoch_train_loss / num_simulations
         avg_test_loss = epoch_test_loss / num_simulations
         train_losses.append(avg_train_loss)
@@ -137,17 +169,18 @@ def train_evaluate_estimator(estimator_type, baseline_stats, num_epochs=5,
         print(f"Theta: {theta.item():.4f}\n")
     
     return train_losses, test_losses, theta_history
+
 def wasserstein_distance(sim_final, base_final):
     sorted_sim = torch.sort(sim_final)[0]
     sorted_base = torch.sort(base_final)[0]
     min_length = min(len(sorted_sim), len(sorted_base))
     return torch.abs(sorted_sim[:min_length] - sorted_base[:min_length]).mean()
 
-
 def evaluate_model(theta, estimator_type, baseline_data, num_samples=1000, device='cpu'):
     with torch.no_grad():
         sim_final = torch.stack([
             simulate_full_trajectory(theta, device=device, estimator=estimator_type)[-1]
+            # for _ in range(num_samples)
         ])
     
     base_final = baseline_data['final_positions']
@@ -157,16 +190,21 @@ def evaluate_model(theta, estimator_type, baseline_data, num_samples=1000, devic
         'mean_absolute_error': F.mse_loss(sim_final.mean(), base_final.mean()),
         'variance_ratio': sim_final.var() / base_final.var()
     }
+
 # -------------------------------
 # Main Execution
 # -------------------------------
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    baseline_data = generate_long_baseline(device=device)   # baseline data
-    num_epochs = 10
+    # Generate baseline data for 1000 steps.
+    print("generating baseline data")
+    baseline_data = generate_long_baseline(total_steps=1000, device=device)
+    num_epochs = 2
     results = {}
+    final_thetas = {}
     for estimator in ['categorical', 'gumbel']:
+        print(f"training {estimator}")
         train_loss, test_loss, theta_hist = train_evaluate_estimator(
             estimator, 
             (baseline_data['train_mean'], None, baseline_data['test_mean'], None),
@@ -174,13 +212,15 @@ if __name__ == "__main__":
         )
         
         final_theta = torch.tensor([theta_hist[-1]], device=device)
-        # metrics = evaluate_model(final_theta, estimator, baseline_data, device=device)
+        final_thetas[estimator] = final_theta
         print(f"------Estimator: {estimator}------")
         print(f"average train loss: {sum(train_loss)/len(train_loss)}")
         print(f"average test loss: {sum(test_loss)/len(test_loss)}")
         print(f" Minimum Test Loss: {min(test_loss)}")
         print(f"Final theta: {final_theta.item()}")
         print("-------------------------")
+        # metrics = evaluate_model(final_theta, estimator, baseline_data, device=device)
+        
         # results[estimator] = {
         #     'train_loss': train_loss,
         #     'test_loss': test_loss,
@@ -188,32 +228,33 @@ if __name__ == "__main__":
         #     **metrics
         # }
     
-    # Plot results
+    # # Display final benchmark results.
     # print("\nFinal Benchmark Results:")
     # for est in results:
     #     print(f"{est.upper()} Estimator:")
     #     print(f"  - Wasserstein Distance: {results[est]['wasserstein']:.4f}")
     #     print(f"  - Mean Absolute Error: {results[est]['mean_absolute_error']:.4f}")
     #     print(f"  - Variance Ratio: {results[est]['variance_ratio']:.4f}")
-    #     print(f"  - Final Theta: {results[est]['theta'][-1]:.4f}\n")    
-
-    # plt.figure(figsize=(12, 6))
-    # for estimator in results:
-    #     plt.plot(results[estimator]['train_loss'], '--', label=f'{estimator} (Train)')
-    #     plt.plot(results[estimator]['test_loss'], '-', label=f'{estimator} (Test)')
-    # plt.xlabel('Epoch')
-    # plt.ylabel('MSE')
-    # plt.title('Training and Test MSE Comparison')
+    #     print(f"  - Final Theta: {results[est]['theta'][-1]:.4f}\n")
+    
+    # # -------------------------------
+    # # Plot trajectories for comparison
+    # # -------------------------------
+    # # Use the baseline average trajectory
+    # baseline_mean = baseline_data['baseline_mean'].cpu().numpy()
+    # steps = range(len(baseline_mean))
+    
+    # # Simulate one trajectory using the final theta for each estimator.
+    # categorical_traj = simulate_full_trajectory(final_thetas['categorical'], device=device, estimator='categorical').detach().cpu().numpy()
+    # gumbel_traj = simulate_full_trajectory(final_thetas['gumbel'], device=device, estimator='gumbel').detach().cpu().numpy()
+    # baseline_traj = baseline_data['full_trajectories'][0].cpu().numpy()
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(steps, baseline_traj, label="Baseline Trajectory", linewidth=2)
+    # plt.plot(steps, categorical_traj, label="Categorical Trajectory", linestyle="--")
+    # plt.plot(steps, gumbel_traj, label="Gumbel Trajectory", linestyle=":")
+    # plt.xlabel("Step")
+    # plt.ylabel("Position")
+    # plt.title("Comparison of 1000-Step Random Walk Trajectories")
     # plt.legend()
     # plt.grid(True)
-    # plt.show()
-
-    # plt.figure(figsize=(12, 6))
-    # for estimator in results:
-    #     plt.plot(results[estimator]['theta'], label=f'{estimator}')
-    # plt.xlabel('Epoch')
-    # plt.ylabel('Theta Value')
-    # plt.title('Parameter Convergence')
-    # plt.legend()
-    # plt.grid(True)
-    # plt.show()
+    # plt.savefig("random_walk_comparison.png")
