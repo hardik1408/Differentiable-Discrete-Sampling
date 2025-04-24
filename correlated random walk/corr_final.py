@@ -238,7 +238,7 @@ def analyze_correlated_walks(correlation_range=[0.0, 0.3, 0.6, 0.9], n_steps=100
         plt.grid(True)
     
     plt.tight_layout()
-    plt.savefig("correlated_walks_comparison.png")
+    plt.savefig("stoch/correlated_walks_comparison.png")
     plt.show()
     
     # Plot autocorrelation comparisons for step sizes.
@@ -271,7 +271,7 @@ def analyze_correlated_walks(correlation_range=[0.0, 0.3, 0.6, 0.9], n_steps=100
         plt.grid(True)
     
     plt.tight_layout()
-    plt.savefig("step_autocorrelation_comparison.png")
+    plt.savefig("stoch/step_autocorrelation_comparison.png")
     plt.show()
     
     return {"categorical": categorical_results, "gumbel": gumbel_results}
@@ -287,7 +287,7 @@ def test_gradient_flow(n_trials=5, n_steps=100, tau=10.0):
     n_choices = 3
 
     results = {}
-    methods = ['categorical', 'stochcat']
+    methods = ['categorical', 'stochcat' , 'gumbel']
 
     for corr in correlation_range:
         print(f"\n--- Correlation = {corr} ---")
@@ -342,7 +342,9 @@ def test_gradient_flow(n_trials=5, n_steps=100, tau=10.0):
                         move_val = moves[idx].item()
 
                     else:
-                        raise ValueError(f"Unknown method {method}")
+                        gumbel_sample = F.gumbel_softmax(final_probs.unsqueeze(0), tau=tau, hard=True)
+                        move_idx = gumbel_sample.argmax(dim=1).item()
+                        move_val = moves[move_idx].item()
 
                     x = x + move_val
                     move_history = torch.cat([move_history[1:], torch.tensor([move_val], device=device)])
@@ -363,7 +365,7 @@ def test_gradient_flow(n_trials=5, n_steps=100, tau=10.0):
 
 if __name__ == "__main__":
     print("Running correlated random walk analysis...")
-    analyze_correlated_walks(correlation_range=[0.0, 0.3, 0.6, 0.9], n_steps=200)
+    # analyze_correlated_walks(correlation_range=[0.0, 0.3, 0.6, 0.9], n_steps=200)
     results = test_gradient_flow(n_trials=10, n_steps=100)
     for corr, res in results.items():
         print(f"\nCorrelation {corr}:")

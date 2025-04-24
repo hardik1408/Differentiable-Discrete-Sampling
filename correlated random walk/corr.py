@@ -537,7 +537,7 @@ if __name__ == "__main__":
     
     # Test gradient flow through the correlated random walk
     print("Testing gradient flow...")
-    results = test_gradient_flow(n_trials=100, n_steps=100)
+    results = test_gradient_flow(n_trials=10, n_steps=100)
     correlation_range = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     for correlation in correlation_range:
         print(f"Correlation: {correlation}")
