@@ -5,3 +5,4 @@
 
 Files contained:
 - `bench.py` : compares cat and gumbel methods
+- `bench_final.py` : compares gumbel,cat,cat++
