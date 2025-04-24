@@ -6,3 +6,8 @@
 Files contained:
 - `bench.py` : compares cat and gumbel methods
 - `bench_final.py` : compares gumbel,cat,cat++
+
+To run;
+```bash
+python bench_final.py
+```
