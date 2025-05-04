@@ -1,0 +1,201 @@
+/u/ayushc/projects/COLLAB/surya_code/lib/python3.8/site-packages/torch/cuda/__init__.py:52: UserWarning: CUDA initialization: CUDA unknown error - this may be due to an incorrectly set up environment, e.g. changing env variable CUDA_VISIBLE_DEVICES after program start. Setting the available devices to be zero. (Triggered internally at  /opt/conda/conda-bld/pytorch_1623448278899/work/c10/cuda/CUDAFunctions.cpp:115.)
+  return torch._C._cuda_getDeviceCount() > 0
+Using device: cpu
+
+Benchmarking categorical gradient estimator:
+  Run 1/5:
+Episode 0, Reward: 280.36, Steps: 97, Agents Alive: 1, Total Sugar: 53.46
+Episode 10, Reward: 392.55, Steps: 72, Agents Alive: 1, Total Sugar: 33.17
+Episode 20, Reward: 546.19, Steps: 81, Agents Alive: 1, Total Sugar: 29.94
+Episode 30, Reward: 257.39, Steps: 91, Agents Alive: 1, Total Sugar: 14.34
+Episode 40, Reward: 166.07, Steps: 27, Agents Alive: 1, Total Sugar: -0.13
+Episode 49, Reward: 176.74, Steps: 26, Agents Alive: 1, Total Sugar: -0.14
+    Final Reward: 176.74, Steps: 26, Agents Alive: 1, Total Sugar: -0.14, Time: 9.11 sec
+  Run 2/5:
+Episode 0, Reward: 183.34, Steps: 32, Agents Alive: 1, Total Sugar: -0.73
+Episode 10, Reward: 433.97, Steps: 97, Agents Alive: 1, Total Sugar: 42.79
+Episode 20, Reward: 147.37, Steps: 24, Agents Alive: 1, Total Sugar: -0.35
+Episode 30, Reward: 263.53, Steps: 56, Agents Alive: 1, Total Sugar: 17.25
+Episode 40, Reward: 166.22, Steps: 25, Agents Alive: 1, Total Sugar: -1.55
+Episode 49, Reward: 244.69, Steps: 67, Agents Alive: 1, Total Sugar: 5.49
+    Final Reward: 244.69, Steps: 67, Agents Alive: 1, Total Sugar: 5.49, Time: 7.87 sec
+  Run 3/5:
+Episode 0, Reward: 186.76, Steps: 30, Agents Alive: 1, Total Sugar: -0.31
+Episode 10, Reward: 270.31, Steps: 62, Agents Alive: 1, Total Sugar: 12.79
+Episode 20, Reward: 388.32, Steps: 74, Agents Alive: 1, Total Sugar: 35.61
+Episode 30, Reward: 387.80, Steps: 87, Agents Alive: 1, Total Sugar: -0.39
+Episode 40, Reward: 249.63, Steps: 61, Agents Alive: 1, Total Sugar: 22.85
+Episode 49, Reward: 442.57, Steps: 94, Agents Alive: 1, Total Sugar: 7.03
+    Final Reward: 442.57, Steps: 94, Agents Alive: 1, Total Sugar: 7.03, Time: 9.01 sec
+  Run 4/5:
+Episode 0, Reward: 234.67, Steps: 70, Agents Alive: 1, Total Sugar: -0.66
+Episode 10, Reward: 435.21, Steps: 88, Agents Alive: 1, Total Sugar: 22.65
+Episode 20, Reward: 229.32, Steps: 35, Agents Alive: 1, Total Sugar: -0.24
+Episode 30, Reward: 574.95, Steps: 89, Agents Alive: 1, Total Sugar: 13.32
+Episode 40, Reward: 272.92, Steps: 57, Agents Alive: 1, Total Sugar: 26.69
+Episode 49, Reward: 222.92, Steps: 66, Agents Alive: 1, Total Sugar: 43.01
+    Final Reward: 222.92, Steps: 66, Agents Alive: 1, Total Sugar: 43.01, Time: 9.85 sec
+  Run 5/5:
+Episode 0, Reward: 209.39, Steps: 38, Agents Alive: 1, Total Sugar: -0.39
+Episode 10, Reward: 333.16, Steps: 74, Agents Alive: 1, Total Sugar: -0.12
+Episode 20, Reward: 175.64, Steps: 55, Agents Alive: 1, Total Sugar: -0.02
+Episode 30, Reward: 235.29, Steps: 55, Agents Alive: 1, Total Sugar: 17.18
+Episode 40, Reward: 281.86, Steps: 84, Agents Alive: 1, Total Sugar: 44.72
+Episode 49, Reward: 262.97, Steps: 86, Agents Alive: 1, Total Sugar: 31.27
+    Final Reward: 262.97, Steps: 86, Agents Alive: 1, Total Sugar: 31.27, Time: 9.44 sec
+
+Benchmarking cat++ gradient estimator:
+  Run 1/5:
+Episode 0, Reward: 88.47, Steps: 29, Agents Alive: 1, Total Sugar: -0.30
+Episode 10, Reward: 192.43, Steps: 57, Agents Alive: 1, Total Sugar: -0.15
+Episode 20, Reward: 89.45, Steps: 19, Agents Alive: 1, Total Sugar: -0.26
+Episode 30, Reward: 407.55, Steps: 89, Agents Alive: 1, Total Sugar: 18.08
+Episode 40, Reward: 251.11, Steps: 68, Agents Alive: 1, Total Sugar: 25.59
+Episode 49, Reward: 282.60, Steps: 46, Agents Alive: 1, Total Sugar: -0.28
+    Final Reward: 282.60, Steps: 46, Agents Alive: 1, Total Sugar: -0.28, Time: 8.88 sec
+  Run 2/5:
+Episode 0, Reward: 298.67, Steps: 66, Agents Alive: 1, Total Sugar: 14.50
+Episode 10, Reward: 263.36, Steps: 98, Agents Alive: 1, Total Sugar: 3.09
+Episode 20, Reward: 119.63, Steps: 23, Agents Alive: 1, Total Sugar: -0.46
+Episode 30, Reward: 351.57, Steps: 96, Agents Alive: 1, Total Sugar: 11.07
+Episode 40, Reward: 311.41, Steps: 83, Agents Alive: 1, Total Sugar: 25.70
+Episode 49, Reward: 128.33, Steps: 17, Agents Alive: 1, Total Sugar: -0.19
+    Final Reward: 128.33, Steps: 17, Agents Alive: 1, Total Sugar: -0.19, Time: 9.43 sec
+  Run 3/5:
+Episode 0, Reward: 546.27, Steps: 78, Agents Alive: 1, Total Sugar: 5.83
+Episode 10, Reward: 325.30, Steps: 99, Agents Alive: 1, Total Sugar: 74.76
+Episode 20, Reward: 739.93, Steps: 95, Agents Alive: 1, Total Sugar: -0.43
+Episode 30, Reward: 398.18, Steps: 78, Agents Alive: 1, Total Sugar: 6.97
+Episode 40, Reward: 249.70, Steps: 57, Agents Alive: 1, Total Sugar: 38.63
+Episode 49, Reward: 395.43, Steps: 63, Agents Alive: 1, Total Sugar: 19.12
+    Final Reward: 395.43, Steps: 63, Agents Alive: 1, Total Sugar: 19.12, Time: 11.73 sec
+  Run 4/5:
+Episode 0, Reward: 112.75, Steps: 20, Agents Alive: 1, Total Sugar: -0.37
+Episode 10, Reward: 133.22, Steps: 22, Agents Alive: 1, Total Sugar: -0.46
+Episode 20, Reward: 229.38, Steps: 59, Agents Alive: 1, Total Sugar: 16.35
+Episode 30, Reward: 415.28, Steps: 69, Agents Alive: 1, Total Sugar: 9.61
+Episode 40, Reward: 296.02, Steps: 70, Agents Alive: 1, Total Sugar: -0.48
+Episode 49, Reward: 398.10, Steps: 74, Agents Alive: 1, Total Sugar: 11.45
+    Final Reward: 398.10, Steps: 74, Agents Alive: 1, Total Sugar: 11.45, Time: 8.20 sec
+  Run 5/5:
+Episode 0, Reward: 206.67, Steps: 57, Agents Alive: 1, Total Sugar: 23.56
+Episode 10, Reward: 293.64, Steps: 51, Agents Alive: 1, Total Sugar: 23.31
+Episode 20, Reward: 290.90, Steps: 55, Agents Alive: 1, Total Sugar: 27.86
+Episode 30, Reward: 298.32, Steps: 83, Agents Alive: 1, Total Sugar: -0.12
+Episode 40, Reward: 421.16, Steps: 64, Agents Alive: 1, Total Sugar: 40.22
+Episode 49, Reward: 562.97, Steps: 89, Agents Alive: 1, Total Sugar: 18.42
+    Final Reward: 562.97, Steps: 89, Agents Alive: 1, Total Sugar: 18.42, Time: 9.26 sec
+
+Benchmarking gumbel gradient estimator:
+  Run 1/5:
+Episode 0, Reward: 582.96, Steps: 92, Agents Alive: 1, Total Sugar: 17.12
+Episode 10, Reward: 295.03, Steps: 79, Agents Alive: 1, Total Sugar: 0.60
+Episode 20, Reward: 168.43, Steps: 41, Agents Alive: 1, Total Sugar: -0.09
+Episode 30, Reward: 272.33, Steps: 99, Agents Alive: 1, Total Sugar: 41.26
+Episode 40, Reward: 696.59, Steps: 95, Agents Alive: 1, Total Sugar: 65.16
+Episode 49, Reward: 328.16, Steps: 84, Agents Alive: 1, Total Sugar: 14.70
+    Final Reward: 328.16, Steps: 84, Agents Alive: 1, Total Sugar: 14.70, Time: 9.55 sec
+  Run 2/5:
+Episode 0, Reward: 277.91, Steps: 88, Agents Alive: 1, Total Sugar: 38.62
+Episode 10, Reward: 411.08, Steps: 91, Agents Alive: 1, Total Sugar: 42.45
+Episode 20, Reward: 126.32, Steps: 20, Agents Alive: 1, Total Sugar: -0.48
+Episode 30, Reward: 302.58, Steps: 51, Agents Alive: 1, Total Sugar: 17.24
+Episode 40, Reward: 295.65, Steps: 77, Agents Alive: 1, Total Sugar: 17.25
+Episode 49, Reward: 72.60, Steps: 9, Agents Alive: 1, Total Sugar: -1.69
+    Final Reward: 72.60, Steps: 9, Agents Alive: 1, Total Sugar: -1.69, Time: 9.05 sec
+  Run 3/5:
+Episode 0, Reward: 425.83, Steps: 91, Agents Alive: 1, Total Sugar: 25.20
+Episode 10, Reward: 342.21, Steps: 70, Agents Alive: 1, Total Sugar: 26.26
+Episode 20, Reward: 373.45, Steps: 79, Agents Alive: 1, Total Sugar: -0.17
+Episode 30, Reward: 503.16, Steps: 97, Agents Alive: 1, Total Sugar: 12.86
+Episode 40, Reward: 159.74, Steps: 41, Agents Alive: 1, Total Sugar: -0.67
+Episode 49, Reward: 375.22, Steps: 65, Agents Alive: 1, Total Sugar: 35.52
+    Final Reward: 375.22, Steps: 65, Agents Alive: 1, Total Sugar: 35.52, Time: 9.90 sec
+  Run 4/5:
+Episode 0, Reward: 371.30, Steps: 88, Agents Alive: 1, Total Sugar: 23.54
+Episode 10, Reward: 337.25, Steps: 80, Agents Alive: 1, Total Sugar: 13.38
+Episode 20, Reward: 365.30, Steps: 77, Agents Alive: 1, Total Sugar: 18.91
+Episode 30, Reward: 428.24, Steps: 99, Agents Alive: 2, Total Sugar: 50.18
+Episode 40, Reward: 120.08, Steps: 24, Agents Alive: 1, Total Sugar: -0.07
+Episode 49, Reward: 600.34, Steps: 92, Agents Alive: 1, Total Sugar: 14.39
+    Final Reward: 600.34, Steps: 92, Agents Alive: 1, Total Sugar: 14.39, Time: 10.09 sec
+  Run 5/5:
+Episode 0, Reward: 460.93, Steps: 97, Agents Alive: 1, Total Sugar: 13.66
+Episode 10, Reward: 297.11, Steps: 76, Agents Alive: 1, Total Sugar: 16.42
+Episode 20, Reward: 297.78, Steps: 88, Agents Alive: 1, Total Sugar: -0.62
+Episode 30, Reward: 240.75, Steps: 54, Agents Alive: 1, Total Sugar: 25.17
+Episode 40, Reward: 359.41, Steps: 62, Agents Alive: 1, Total Sugar: 6.85
+Episode 49, Reward: 333.86, Steps: 74, Agents Alive: 1, Total Sugar: -0.66
+    Final Reward: 333.86, Steps: 74, Agents Alive: 1, Total Sugar: -0.66, Time: 9.10 sec
+
+Benchmarking reinforce gradient estimator:
+  Run 1/5:
+Episode 0, Reward: -0.05, Steps: 87, Agents Alive: 1, Total Sugar: 25.34
+Episode 10, Reward: -4.10, Steps: 61, Agents Alive: 1, Total Sugar: 18.33
+Episode 20, Reward: -2.26, Steps: 35, Agents Alive: 1, Total Sugar: -0.39
+Episode 30, Reward: 1.08, Steps: 35, Agents Alive: 1, Total Sugar: -0.03
+Episode 40, Reward: 2.05, Steps: 22, Agents Alive: 1, Total Sugar: -0.38
+Episode 49, Reward: 0.77, Steps: 17, Agents Alive: 1, Total Sugar: -0.52
+    Final Reward: 0.77, Steps: 17, Agents Alive: 1, Total Sugar: -0.52, Time: 7.50 sec
+  Run 2/5:
+Episode 0, Reward: 3.08, Steps: 75, Agents Alive: 1, Total Sugar: 54.74
+Episode 10, Reward: 12.14, Steps: 32, Agents Alive: 1, Total Sugar: -0.14
+Episode 20, Reward: -0.63, Steps: 27, Agents Alive: 2, Total Sugar: -0.52
+Episode 30, Reward: -0.93, Steps: 21, Agents Alive: 1, Total Sugar: -0.06
+Episode 40, Reward: -2.03, Steps: 8, Agents Alive: 1, Total Sugar: -0.06
+Episode 49, Reward: -0.30, Steps: 15, Agents Alive: 1, Total Sugar: -0.77
+    Final Reward: -0.30, Steps: 15, Agents Alive: 1, Total Sugar: -0.77, Time: 6.15 sec
+  Run 3/5:
+Episode 0, Reward: 3.27, Steps: 83, Agents Alive: 1, Total Sugar: 43.86
+Episode 10, Reward: -3.11, Steps: 26, Agents Alive: 1, Total Sugar: -0.51
+Episode 20, Reward: -4.29, Steps: 54, Agents Alive: 1, Total Sugar: -0.29
+Episode 30, Reward: -2.05, Steps: 42, Agents Alive: 1, Total Sugar: -0.91
+Episode 40, Reward: 5.55, Steps: 29, Agents Alive: 1, Total Sugar: -0.07
+Episode 49, Reward: 4.31, Steps: 60, Agents Alive: 1, Total Sugar: -0.39
+    Final Reward: 4.31, Steps: 60, Agents Alive: 1, Total Sugar: -0.39, Time: 7.63 sec
+  Run 4/5:
+Episode 0, Reward: -0.53, Steps: 43, Agents Alive: 1, Total Sugar: -0.58
+Episode 10, Reward: 2.65, Steps: 52, Agents Alive: 1, Total Sugar: -0.05
+Episode 20, Reward: -3.75, Steps: 11, Agents Alive: 2, Total Sugar: -1.21
+Episode 30, Reward: -0.69, Steps: 49, Agents Alive: 1, Total Sugar: -0.71
+Episode 40, Reward: -1.86, Steps: 49, Agents Alive: 1, Total Sugar: -0.05
+Episode 49, Reward: -0.78, Steps: 34, Agents Alive: 1, Total Sugar: -0.97
+    Final Reward: -0.78, Steps: 34, Agents Alive: 1, Total Sugar: -0.97, Time: 7.49 sec
+  Run 5/5:
+Episode 0, Reward: 4.62, Steps: 58, Agents Alive: 1, Total Sugar: 60.40
+Episode 10, Reward: -0.90, Steps: 41, Agents Alive: 2, Total Sugar: -0.33
+Episode 20, Reward: -0.63, Steps: 54, Agents Alive: 1, Total Sugar: -0.34
+Episode 30, Reward: -1.34, Steps: 38, Agents Alive: 1, Total Sugar: -0.24
+Episode 40, Reward: -1.10, Steps: 18, Agents Alive: 1, Total Sugar: -0.44
+Episode 49, Reward: 3.49, Steps: 12, Agents Alive: 1, Total Sugar: -0.20
+    Final Reward: 3.49, Steps: 12, Agents Alive: 1, Total Sugar: -0.20, Time: 7.02 sec
+
+Benchmark Results:
+
+Gradient Estimator: categorical
+  Average Final Reward: 269.98 ± 90.98
+  Average Steps Survived: 67.80 ± 23.53
+  Average Agents Alive: 1.00 ± 0.00
+  Average Total Sugar: 17.33 ± 16.77
+  Average Training Time: 9.06 ± 0.66 sec
+
+Gradient Estimator: cat++
+  Average Final Reward: 353.49 ± 143.77
+  Average Steps Survived: 57.80 ± 24.77
+  Average Agents Alive: 1.00 ± 0.00
+  Average Total Sugar: 9.70 ± 8.55
+  Average Training Time: 9.50 ± 1.19 sec
+
+Gradient Estimator: gumbel
+  Average Final Reward: 342.04 ± 167.74
+  Average Steps Survived: 64.80 ± 29.35
+  Average Agents Alive: 1.00 ± 0.00
+  Average Total Sugar: 12.45 ± 13.51
+  Average Training Time: 9.54 ± 0.42 sec
+
+Gradient Estimator: reinforce
+  Average Final Reward: 1.50 ± 2.04
+  Average Steps Survived: 27.60 ± 17.92
+  Average Agents Alive: 1.00 ± 0.00
+  Average Total Sugar: -0.57 ± 0.27
+  Average Training Time: 7.16 ± 0.54 sec
