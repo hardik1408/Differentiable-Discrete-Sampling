@@ -32,53 +32,40 @@ class LearnableStochasticCategorical(torch.autograd.Function):
     def forward(ctx, p, uncertainty_in=None, alpha=None, beta=None):
         # Sample from categorical distribution
         result = torch.multinomial(p, num_samples=1)
-        
         # Create one-hot encoding of the result
         one_hot = torch.zeros_like(p)
         one_hot.scatter_(-1, result, 1.0)
-        
-        # Calculate variance for chosen and non-chosen outcomes
         var_chosen = (1.0 - p) / p.clamp(min=1e-10)
         var_not_chosen = p / (1.0 - p).clamp(min=1e-10)
-        
         # Calculate operation variance
         op_variance = one_hot * var_chosen + (1 - one_hot) * var_not_chosen
-        
         # Propagate uncertainty
         if uncertainty_in is not None:
             uncertainty_out = uncertainty_in + op_variance
         else:
             uncertainty_out = op_variance
-        
         # Save context for backward pass
         ctx.save_for_backward(result, p, uncertainty_out, alpha, beta)
-        
         return result, uncertainty_out
     
     @staticmethod
     def backward(ctx, grad_output, grad_uncertainty=None):
         result, p, uncertainty, alpha, beta = ctx.saved_tensors
-        
         # Create one-hot encoding
         one_hot = torch.zeros_like(p)
         one_hot.scatter_(-1, result, 1.0)
-        
         # Base weights for chosen and non-chosen outcomes
         w_chosen = (1.0 / p.clamp(min=1e-10)) / 2
         w_non_chosen = (1.0 / (1.0 - p).clamp(min=1e-10)) / 2
-        
         # Apply the learnable alpha parameter to control confidence scaling
         confidence = 1.0 / (1.0 + alpha * uncertainty.clamp(min=1e-6))
-        
         # Apply the learnable beta parameter to control balance between chosen/non-chosen
         adjusted_ws = (one_hot * w_chosen * beta + (1 - one_hot) * w_non_chosen * (1 - beta)) * confidence
-        
         # Normalize to maintain gradient scale
         adjusted_ws = adjusted_ws / adjusted_ws.mean().clamp(min=1e-10)
-        
         # Apply the adjusted weights to gradients
         grad_p = grad_output.expand_as(p) * adjusted_ws
-        
+
         # Compute gradients for alpha and beta
         # Gradient for alpha: how changing alpha affects the adjusted weights and thus the output
         confidence_derivative = -uncertainty.clamp(min=1e-6) * confidence * confidence
@@ -444,7 +431,7 @@ class MultiAgentSystem:
         return total_reward, log_probs, rewards
 
 # Optimization functions for direct gradient methods (Cat++, StochasticAD, Gumbel-Softmax)
-def optimize_multi_agent_direct(system, n_episodes=1000, lr=0.01, method="cat++"):
+def optimize_multi_agent_direct(system, max_steps,n_episodes=1000, lr=0.01, method="cat++"):
     # Collect all policy parameters
     policy_params = []
     for agent in system.agents:
@@ -471,7 +458,7 @@ def optimize_multi_agent_direct(system, n_episodes=1000, lr=0.01, method="cat++"
         verbose = (episode % 100 == 0)
         
         # Run episode and get reward tensor
-        total_reward = system.run_episode_direct(method=method, verbose=verbose)
+        total_reward = system.run_episode_direct(max_steps=max_steps,method=method, verbose=verbose)
         rewards_history.append(total_reward.item())
         
         # Track learnable parameters if using cat++
@@ -499,7 +486,7 @@ def optimize_multi_agent_direct(system, n_episodes=1000, lr=0.01, method="cat++"
     return result
 
 # Optimization function for REINFORCE
-def optimize_multi_agent_reinforce(system, n_episodes=1000, lr=0.01):
+def optimize_multi_agent_reinforce(system, max_steps,n_episodes=1000, lr=0.01):
     # Collect all policy parameters
     policy_params = []
     for agent in system.agents:
@@ -515,7 +502,7 @@ def optimize_multi_agent_reinforce(system, n_episodes=1000, lr=0.01):
         verbose = (episode % 100 == 0)
         
         # Run episode and collect trajectories
-        total_reward, log_probs, step_rewards = system.run_episode_reinforce(verbose=verbose)
+        total_reward, log_probs, step_rewards = system.run_episode_reinforce(max_steps,verbose=verbose)
         rewards_history.append(total_reward)
         
         # Calculate returns with discount factor
@@ -547,7 +534,7 @@ def optimize_multi_agent_reinforce(system, n_episodes=1000, lr=0.01):
     return {"rewards": rewards_history}
 
 # Benchmark function
-def benchmark_multi_agent(n_agents=3, grid_size=5, n_resources=4, n_episodes=500, n_runs=5, lr=0.01, device="cpu"):
+def benchmark_multi_agent(max_steps,n_agents=3, grid_size=5, n_resources=4, n_episodes=500, n_runs=5, lr=0.01, device="cpu"):
     all_results = {
         "cat++": {}, 
         "categorical": {}, 
@@ -580,6 +567,7 @@ def benchmark_multi_agent(n_agents=3, grid_size=5, n_resources=4, n_episodes=500
                 # Use REINFORCE optimization
                 results = optimize_multi_agent_reinforce(
                     system,
+                    max_steps=max_steps,
                     n_episodes=n_episodes,
                     lr=lr
                 )
@@ -588,6 +576,7 @@ def benchmark_multi_agent(n_agents=3, grid_size=5, n_resources=4, n_episodes=500
                 # Use direct gradient optimization for other methods
                 results = optimize_multi_agent_direct(
                     system,
+                    max_steps=max_steps,
                     n_episodes=n_episodes,
                     lr=lr,
                     method=method
@@ -641,13 +630,15 @@ if __name__ == "__main__":
     total_reward = system.run_episode_direct(method="cat++", verbose=True)
     print(f"Debug episode total reward: {total_reward.item()}")
     
+    max_steps = 75
     # Only proceed to full benchmark if debug episode works
     if total_reward.item() > 0:
         results = benchmark_multi_agent(
+            max_steps,
             n_agents=3,
             grid_size=5,
             n_resources=4,
-            n_episodes=500,
+            n_episodes=300,
             n_runs=5,
             lr=0.01,
             device=device
@@ -656,6 +647,7 @@ if __name__ == "__main__":
         print("\nBenchmark Results:")
         for method, metrics in results.items():
             print(f"\nEstimator: {method}")
+            print(f"Step length: {max_steps}, ")
             print(f"  Average Final Reward={metrics['avg_final_reward']:.2f}, "
                  f"Average Time={metrics['avg_time_sec']:.2f} sec")
                   
@@ -679,7 +671,7 @@ if __name__ == "__main__":
         ax2.set_ylabel('Time (seconds)')
         
         plt.tight_layout()
-        plt.savefig("multi_agent_results.png")
+        plt.savefig(f"multi_agent_results_{max_steps}.png")
         plt.show()
         
         # If Cat++ was run, plot the learnable parameter evolution
@@ -704,7 +696,7 @@ if __name__ == "__main__":
             plt.grid(True, alpha=0.3)
             
             plt.tight_layout()
-            plt.savefig("cat_plus_plus_parameters.png")
+            plt.savefig(f"cat_plus_plus_parameters_{max_steps}.png")
             plt.show()
         
         # Plot learning curves if available
@@ -726,14 +718,16 @@ if __name__ == "__main__":
             if method == "reinforce":
                 results = optimize_multi_agent_reinforce(
                     system,
-                    n_episodes=n_episodes,
-                    lr=lr
+                    max_steps=max_steps,
+                    n_episodes=100,
+                    lr=0.01
                 )
             else:
                 results = optimize_multi_agent_direct(
                     system,
-                    n_episodes=n_episodes,
-                    lr=lr,
+                    max_steps=max_steps,
+                    n_episodes=100,
+                    lr=0.01,
                     method=method
                 )
             
@@ -757,7 +751,7 @@ if __name__ == "__main__":
         plt.title('Learning Curves for Different Gradient Estimators')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.savefig("learning_curves.png")
+        plt.savefig(f"learning_curves_{max_steps}.png")
         plt.show()
     else:
         print("Debug episode failed - resources not being collected. Please fix before running full benchmark.")
