@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import json
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
+import math
 # Custom estimators
 class StochasticCategorical(torch.autograd.Function):
     @staticmethod
@@ -252,6 +252,26 @@ class SugarscapeExperiment:
                 self.config.gradient_chain_length = L
                 run_results = [self._single_run(method) for _ in range(runs)]
                 all_results[method][L] = self._aggregate(run_results)
+
+        print("Final results:")
+        for chain in chain_lengths:
+            print()
+            print(f"for chain length {chain}:")
+            
+            for method in methods:
+                print(f"=== {method} ===")
+                # print(type(all_results[method][chain]['rewards_mean']))
+                print(f"Mean rewards: {np.mean(all_results[method][chain]['rewards_mean'])}")
+                print(f"Mean gradient variance: {np.mean(all_results[method][chain]['gvs_mean'])}")
+
+
+        # print("\nFinal aggregated results:")
+        # for method, res_dict in all_results.items():
+        #     for L, res in res_dict.items():
+        #         mean_reward = res['rewards_mean'][-1] if len(res['rewards_mean']) > 0 else None
+        #         mean_variance = res['variance_mean'][-1] if len(res['variance_mean']) > 0 else None
+        #         print(f"Method: {method}, Chain Length: {L}, Final Mean Reward: {mean_reward:.4f}, Final Variance: {mean_variance:.4f}")
+
         return all_results
 
     def _single_run(self, method: str) -> Dict:
@@ -308,6 +328,8 @@ class SugarscapeExperiment:
         plt.savefig("variance_vs_chain_length.png", dpi=150)
         plt.show()
         
+# def mean(lst):
+#     return sum(lst) / len(lst) if lst else 0.0
 
 if __name__ == '__main__':
     print('Initializing experiment config...')
