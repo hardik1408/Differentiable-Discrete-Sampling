@@ -2,10 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Tuple, Dict, List
+import matplotlib.pyplot as plt
+from collections import defaultdict
 import time
+import random
 
-# Placeholder implementations for your custom gradient estimators
+seed = 42  
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
 class StochasticCategorical(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p, uncertainty_in=None):
@@ -83,492 +88,422 @@ class Categorical(torch.autograd.Function):
         weights = (one_hot - p) / (p * (1-p)) 
         return grad_output.expand_as(p) * weights
 
-class PolicyNetwork(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
-        )
-        
-        # Learnable parameters for LearnableStochasticCategorical
-        self.alpha = nn.Parameter(torch.tensor(1.0))
-        self.beta = nn.Parameter(torch.tensor(0.5))
-    
-    def forward(self, x):
-        return self.network(x)
-    
-    def get_policy_params(self):
-        return {'alpha': self.alpha, 'beta': self.beta}
-
-class Config:
-    def __init__(self):
-        self.tau = 0.5  # Gumbel softmax temperature
-
-class BoidAgent:
-    def __init__(self, agent_id: int, policy: PolicyNetwork, config: Config):
-        self.agent_id = agent_id
-        self.policy = policy
-        self.config = config
-    
-    def sample_neighbor_selection(self, state: torch.Tensor, num_neighbors: int, method: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sample which neighbors to select using different methods"""
-        if num_neighbors == 0:
-            return torch.empty(0, dtype=torch.long), torch.tensor(0.0)
-        
-        # Get policy logits for neighbor selection
-        logits = self.policy(state)
-        
-        # Create a mask for available neighbors
-        if num_neighbors < logits.shape[-1]:
-            # Zero out logits for non-existent neighbors
-            mask = torch.zeros_like(logits)
-            mask[:num_neighbors] = 1.0
-            logits = logits + (1 - mask) * (-1e9)
-        
-        # Normalize logits to probabilities
-        probs = F.softmax(logits, dim=-1)
-        params = self.policy.get_policy_params()
-        
-        if method == 'Gumbel':
-            # Use Gumbel-Softmax with different temperature based on agent_id
-            temp = self.config.tau * (1.0 + 0.1 * self.agent_id)  # Vary temperature per agent
-            gumbel_samples = F.gumbel_softmax(logits, tau=temp, hard=True)
-            selected_indices = torch.where(gumbel_samples > 0.5)[0]
-            if len(selected_indices) == 0:
-                selected_indices = torch.tensor([torch.argmax(probs).item()])
-            # Limit selection
-            selected_indices = selected_indices[:min(3, num_neighbors)]
-            log_prob = torch.sum(torch.log(probs[selected_indices] + 1e-8))
-            
-        elif method == 'Learnable AUG':
-            # Use learnable parameters with agent-specific modulation
-            alpha_mod = params['alpha'] * (1.0 + 0.05 * self.agent_id)
-            beta_mod = torch.sigmoid(params['beta'] + 0.1 * self.agent_id)  # Agent-specific beta
-            
-            selected_indices = []
-            log_prob = 0
-            remaining_probs = probs.clone()
-            
-            for _ in range(min(3, num_neighbors)):
-                if len(selected_indices) >= num_neighbors:
-                    break
-                # Sample using learnable parameters
-                action_tensor, _ = LearnableStochasticCategorical.apply(
-                    remaining_probs.unsqueeze(0), None, alpha_mod, beta_mod
-                )
-                idx = action_tensor.item()
-                if idx < num_neighbors and idx not in selected_indices:
-                    selected_indices.append(idx)
-                    log_prob += torch.log(remaining_probs[idx] + 1e-8)
-                    # Reduce probability of selected neighbor for next iteration
-                    remaining_probs[idx] *= 0.1
-                    remaining_probs = F.softmax(remaining_probs, dim=-1)
-                else:
-                    break
-            
-            selected_indices = torch.tensor(selected_indices if selected_indices else [0])
-            
-        elif method == 'StochasticAD':
-            # Use pure stochastic sampling with agent-specific noise
-            noisy_probs = probs + torch.randn_like(probs) * 0.01 * (1 + self.agent_id * 0.1)
-            noisy_probs = F.softmax(noisy_probs, dim=-1)
-            
-            selected_indices = []
-            log_prob = 0
-            remaining_probs = noisy_probs.clone()
-            
-            for _ in range(min(3, num_neighbors)):
-                if len(selected_indices) >= num_neighbors:
-                    break
-                action_tensor = Categorical.apply(remaining_probs.unsqueeze(0))
-                idx = int(action_tensor.item())
-                if idx < num_neighbors and idx not in selected_indices:
-                    selected_indices.append(idx)
-                    log_prob += torch.log(remaining_probs[idx] + 1e-8)
-                    # Remove selected neighbor
-                    remaining_probs[idx] = 0
-                    if remaining_probs.sum() > 0:
-                        remaining_probs = remaining_probs / remaining_probs.sum()
-                    else:
-                        break
-                else:
-                    break
-            
-            selected_indices = torch.tensor(selected_indices if selected_indices else [0])
-            
-        else:  # StochasticCategorical
-            # Use basic stochastic categorical with agent-specific variance
-            variance_factor = 1.0 + 0.1 * self.agent_id
-            adjusted_probs = probs * variance_factor
-            adjusted_probs = F.softmax(adjusted_probs, dim=-1)
-            
-            selected_indices = []
-            log_prob = 0
-            remaining_probs = adjusted_probs.clone()
-            
-            for _ in range(min(3, num_neighbors)):
-                if len(selected_indices) >= num_neighbors:
-                    break
-                action_tensor, _ = StochasticCategorical.apply(remaining_probs.unsqueeze(0), None)
-                idx = action_tensor.item()
-                if idx < num_neighbors and idx not in selected_indices:
-                    selected_indices.append(idx)
-                    log_prob += torch.log(remaining_probs[idx] + 1e-8)
-                    # Remove selected neighbor
-                    remaining_probs[idx] = 0
-                    if remaining_probs.sum() > 0:
-                        remaining_probs = remaining_probs / remaining_probs.sum()
-                    else:
-                        break
-                else:
-                    break
-            
-            selected_indices = torch.tensor(selected_indices if selected_indices else [0])
-        
-        return selected_indices, log_prob
-
 class DifferentiableBoids:
-    def __init__(self, num_agents: int, max_neighbors: int = 5, world_size: float = 10.0):
-        self.num_agents = num_agents
-        self.max_neighbors = max_neighbors
-        self.world_size = world_size
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def __init__(self, n_boids=10, dim=2, max_speed=2.0, perception_radius=3.0):
+        self.n_boids = n_boids
+        self.dim = dim
+        self.max_speed = max_speed
+        self.perception_radius = perception_radius
         
-        # Boids parameters
-        self.separation_weight = 2.0
-        self.alignment_weight = 1.0
-        self.cohesion_weight = 1.0
-        self.max_speed = 2.0
-        self.perception_radius = 3.0
+        # Control actions: [forward, left, right, speed_up, slow_down]
+        self.n_actions = 5
         
-        # Enhanced state dimension to make agents more distinguishable
-        self.state_dim = 8  # [pos_x, pos_y, vel_x, vel_y, num_neighbors, min_distance, agent_id, avg_neighbor_distance]
-        
-    def get_neighbors_vectorized(self, positions: torch.Tensor) -> torch.Tensor:
-        """Get all pairwise distances and neighbor masks"""
-        diff = positions.unsqueeze(1) - positions.unsqueeze(0)
-        distances = torch.norm(diff, dim=2)
-        neighbor_mask = (distances < self.perception_radius) & (distances > 0)
-        return distances, neighbor_mask, diff
-    
-    def get_agent_state(self, agent_idx: int, positions: torch.Tensor, velocities: torch.Tensor, 
-                       distances: torch.Tensor, neighbor_mask: torch.Tensor) -> torch.Tensor:
-        """Get enhanced state representation for a single agent"""
-        neighbors = neighbor_mask[agent_idx]
-        neighbor_distances = distances[agent_idx][neighbors]
-        
-        own_pos = positions[agent_idx]
-        own_vel = velocities[agent_idx]
-        
-        # Neighbor statistics
-        if neighbor_distances.shape[0] > 0:
-            num_neighbors = torch.tensor(float(neighbor_distances.shape[0])).to(self.device)
-            min_distance = neighbor_distances.min()
-            avg_neighbor_distance = neighbor_distances.mean()
-        else:
-            num_neighbors = torch.tensor(0.0).to(self.device)
-            min_distance = torch.tensor(self.perception_radius).to(self.device)
-            avg_neighbor_distance = torch.tensor(self.perception_radius).to(self.device)
-        
-        # Agent ID as a feature (normalized)
-        agent_id_normalized = torch.tensor(float(agent_idx) / self.num_agents).to(self.device)
-        
-        # Enhanced state with more distinguishing features
-        state = torch.cat([
-            own_pos,  # [2]
-            own_vel,  # [2] 
-            num_neighbors.unsqueeze(0),  # [1]
-            min_distance.unsqueeze(0),   # [1]
-            agent_id_normalized.unsqueeze(0),  # [1] - helps distinguish agents
-            avg_neighbor_distance.unsqueeze(0)  # [1]
-        ])  # Total: [8]
-        
-        return state
-    
-    def select_neighbors_with_policy(self, agent_idx: int, positions: torch.Tensor, 
-                                   velocities: torch.Tensor, distances: torch.Tensor,
-                                   neighbor_mask: torch.Tensor, agents: List[BoidAgent], 
-                                   method: str) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """Select neighbors for an agent using the policy"""
-        neighbors = neighbor_mask[agent_idx]
-        neighbor_indices = torch.where(neighbors)[0]
-        
-        if len(neighbor_indices) == 0:
-            return torch.zeros(2).to(self.device), []
-        
-        # Sort neighbors by distance (closest first)
-        neighbor_distances = distances[agent_idx][neighbors]
-        sorted_distances, sort_idx = neighbor_distances.sort()
-        neighbor_indices = neighbor_indices[sort_idx]
-        
-        # Limit to max_neighbors
-        if len(neighbor_indices) > self.max_neighbors:
-            neighbor_indices = neighbor_indices[:self.max_neighbors]
-        
-        # Get agent state
-        state = self.get_agent_state(agent_idx, positions, velocities, distances, neighbor_mask)
-        
-        # Sample neighbor selection using policy
-        selected_neighbor_idx, log_prob = agents[agent_idx].sample_neighbor_selection(
-            state, len(neighbor_indices), method
+        # Policy network parameters
+        self.policy_net = nn.Sequential(
+            nn.Linear(dim * 2, 64),  # position and velocity
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.n_actions)
         )
         
-        # Map selected indices back to actual neighbor indices
-        if len(selected_neighbor_idx) > 0:
-            # Ensure indices are within bounds
-            valid_idx = selected_neighbor_idx[selected_neighbor_idx < len(neighbor_indices)]
-            if len(valid_idx) > 0:
-                selected_neighbors = neighbor_indices[valid_idx]
-            else:
-                selected_neighbors = neighbor_indices[:1]  # Select at least one neighbor
-        else:
-            selected_neighbors = neighbor_indices[:1]  # Select at least one neighbor
+        # Initialize learnable parameters for LearnableStochasticCategorical
+        self.alpha = nn.Parameter(torch.ones(1))
+        self.beta = nn.Parameter(torch.ones(1))
         
-        # Compute boids forces with selected neighbors  
-        force = self.compute_boids_force(agent_idx, positions, velocities, selected_neighbors)
-        
-        return force, [log_prob]
+    def compute_control_probs(self, state, policy_params):
+        """Compute control probabilities from state"""
+        # state: [position, velocity] concatenated
+        logits = self.policy_net(state)
+        return F.softmax(logits, dim=-1)
     
-    def compute_boids_force(self, agent_idx: int, positions: torch.Tensor, 
-                          velocities: torch.Tensor, neighbor_indices: torch.Tensor) -> torch.Tensor:
-        """Compute boids forces for selected neighbors"""
-        if len(neighbor_indices) == 0:
-            return torch.zeros(2).to(self.device)
-        
-        agent_pos = positions[agent_idx]
-        agent_vel = velocities[agent_idx]
-        neighbor_pos = positions[neighbor_indices]
-        neighbor_vel = velocities[neighbor_indices]
-        
-        # Separation force
-        diff = agent_pos - neighbor_pos
-        distances = torch.norm(diff, dim=1, keepdim=True)
-        separation = (diff / (distances + 1e-8)).sum(dim=0)
-        
-        # Alignment force
-        alignment = neighbor_vel.mean(dim=0) - agent_vel
-        
-        # Cohesion force
-        cohesion = neighbor_pos.mean(dim=0) - agent_pos
-        
-        total_force = (self.separation_weight * separation + 
-                      self.alignment_weight * alignment + 
-                      self.cohesion_weight * cohesion)
-        
-        return total_force
+    def compute_control_logits(self, state, policy_params):
+        """Compute control logits from state"""
+        return self.policy_net(state)
     
-    def simulate_step(self, positions: torch.Tensor, velocities: torch.Tensor, 
-                     agents: List[BoidAgent], method: str) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
-        """Single simulation step"""
-        distances, neighbor_mask, _ = self.get_neighbors_vectorized(positions)
-        
-        new_positions = positions.clone()
-        new_velocities = velocities.clone()
-        all_log_probs = []
-        
-        for i in range(self.num_agents):
-            force, log_probs = self.select_neighbors_with_policy(
-                i, positions, velocities, distances, neighbor_mask, agents, method
-            )
-            
-            # Update velocity with force
-            new_velocities[i] += force * 0.1  # dt = 0.1
-            
-            # Limit speed
-            speed = torch.norm(new_velocities[i])
-            if speed > self.max_speed:
-                new_velocities[i] = new_velocities[i] / speed * self.max_speed
-            
-            # Update position
-            new_positions[i] += new_velocities[i] * 0.1  # dt = 0.1
-            
-            # Keep in bounds (toroidal world)
-            new_positions[i] = new_positions[i] % self.world_size
-            
-            all_log_probs.extend(log_probs)
-        
-        return new_positions, new_velocities, all_log_probs
+    def sample_control_stoch(self, state, policy_params):
+        """
+        Uses the custom differentiable categorical estimator.
+        """
+        probs = self.compute_control_probs(state, policy_params)
+        sample = Categorical.apply(probs.unsqueeze(0))
+        control_idx = int(sample.item())
+        log_prob = torch.log(probs[control_idx] + 1e-8)
+        return control_idx, log_prob
     
-    def compute_flocking_coherence(self, positions: torch.Tensor) -> torch.Tensor:
-        """Compute flocking coherence as negative variance from centroid"""
-        centroid = positions.mean(dim=0)
-        distances_to_centroid = torch.norm(positions - centroid, dim=1)
-        coherence = -distances_to_centroid.var()
-        return coherence
+    def sample_control_custom(self, state, policy_params):
+            logits = self.compute_control_probs(state, policy_params)
+            sample, _ = StochasticCategorical.apply(logits.unsqueeze(0), None)
+            control_idx = sample.item()
+            log_prob = torch.log(logits[control_idx] + 1e-8)
+            return control_idx, log_prob
+    
+    def sample_control_cat(self, state, policy_params, tau=1.0):
+        # Uses the LearnableStochasticCategorical estimator
+        probs = self.compute_control_probs(state, policy_params)
+        # Forward pass returns sample and updated uncertainty (ignored here)
+        sample, _ = LearnableStochasticCategorical.apply(
+            probs.unsqueeze(0),
+            None,
+            policy_params['alpha'],
+            policy_params['beta']
+        )
+        control_idx = sample.item()
+        log_prob = torch.log(probs[control_idx] + 1e-8)
+        return control_idx, log_prob
 
-def run_gradient_variance_experiment():
-    """Main experiment function"""
-    # Hyperparameters
-    NUM_AGENTS = 10
-    MAX_NEIGHBORS = 5
-    GRADIENT_CHAIN_LENGTHS = [3, 5, 7, 9, 11]
-    METHODS = ['Gumbel', 'Learnable AUG', 'StochasticAD', 'StochasticCategorical']
-    NUM_RUNS = 20
-    HIDDEN_DIM = 64
-    LEARNING_RATE = 0.001
-    STATE_DIM = 8  # Updated state dimension
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    def sample_control_gumbel(self, state, policy_params, tau=1.0):
+        """Gumbel softmax baseline"""
+        logits = self.compute_control_logits(state, policy_params)
+        gumbel_samples = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
+        control_idx = torch.argmax(gumbel_samples, dim=-1).item()
+        probs = F.softmax(logits, dim=-1)
+        log_prob = torch.log(probs[control_idx] + 1e-8)
+        return control_idx, log_prob
     
-    results = {}
+    def sample_control(self, state, policy_params, method="custom", tau=1.0):
+        """Main sampling function using your interface"""
+        if method == "Learnable AUG":
+            return self.sample_control_cat(state, policy_params, tau)
+        elif method == "Gumbel":
+            return self.sample_control_gumbel(state, policy_params, tau)
+        elif method == "Stochastic AD":
+            return self.sample_control_stoch(state,policy_params)
+        else:
+            return self.sample_control_custom(state, policy_params)
     
-    for method in METHODS:
-        print(f"\n=== Testing Method: {method} ===")
-        results[method] = {}
+    def apply_control(self, positions, velocities, actions):
+        """Apply control actions to boids - returns new velocities"""
+        # actions: [n_boids] list of action indices
+        new_velocities = velocities.clone()
         
-        for chain_length in GRADIENT_CHAIN_LENGTHS:
-            print(f"Chain length: {chain_length}")
+        for i, action in enumerate(actions):
+            if action == 0:  # forward
+                new_velocities[i] = velocities[i]
+            elif action == 1:  # left
+                if self.dim == 2:
+                    rotation = torch.tensor([[0, -1], [1, 0]], dtype=torch.float32)
+                    new_velocities[i] = torch.matmul(rotation, velocities[i])
+            elif action == 2:  # right
+                if self.dim == 2:
+                    rotation = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
+                    new_velocities[i] = torch.matmul(rotation, velocities[i])
+            elif action == 3:  # speed up
+                new_velocities[i] = velocities[i] * 1.1
+            elif action == 4:  # slow down
+                new_velocities[i] = velocities[i] * 0.9
+        
+        # Clip velocities to max speed
+        speeds = torch.norm(new_velocities, dim=1, keepdim=True)
+        max_speed_tensor = torch.tensor(self.max_speed)
+        speed_ratios = torch.minimum(max_speed_tensor / (speeds + 1e-8), torch.ones_like(speeds))
+        new_velocities = new_velocities * speed_ratios
+        
+        return new_velocities
+    
+    def boids_update(self, positions, velocities):
+        """Standard boids rules: separation, alignment, cohesion"""
+        n_boids = positions.shape[0]
+        
+        # Compute pairwise distances
+        pos_diff = positions.unsqueeze(1) - positions.unsqueeze(0)  # [n_boids, n_boids, dim]
+        distances = torch.norm(pos_diff, dim=2)  # [n_boids, n_boids]
+        
+        # Create neighbor mask
+        neighbor_mask = (distances < self.perception_radius) & (distances > 0)
+        
+        # Separation
+        separation = torch.zeros_like(positions)
+        for i in range(n_boids):
+            neighbors = neighbor_mask[i]
+            if neighbors.any():
+                close_neighbors = distances[i] < (self.perception_radius / 2)
+                close_neighbors = close_neighbors & (distances[i] > 0)
+                if close_neighbors.any():
+                    separation[i] = -torch.mean(pos_diff[i][close_neighbors], dim=0)
+        
+        # Alignment
+        alignment = torch.zeros_like(velocities)
+        for i in range(n_boids):
+            neighbors = neighbor_mask[i]
+            if neighbors.any():
+                alignment[i] = torch.mean(velocities[neighbors], dim=0) - velocities[i]
+        
+        # Cohesion
+        cohesion = torch.zeros_like(positions)
+        for i in range(n_boids):
+            neighbors = neighbor_mask[i]
+            if neighbors.any():
+                center_of_mass = torch.mean(positions[neighbors], dim=0)
+                cohesion[i] = center_of_mass - positions[i]
+        
+        # Combine forces
+        total_force = 0.5 * separation + 0.3 * alignment + 0.2 * cohesion
+        
+        # Update velocities
+        new_velocities = velocities + 0.1 * total_force
+        
+        # Clip to max speed
+        speeds = torch.norm(new_velocities, dim=1, keepdim=True)
+        max_speed_tensor = torch.tensor(self.max_speed)
+        speed_ratios = torch.minimum(max_speed_tensor / (speeds + 1e-8), torch.ones_like(speeds))
+        new_velocities = new_velocities * speed_ratios
+        
+        # Update positions
+        new_positions = positions + new_velocities * 0.1
+        
+        return new_positions, new_velocities
+    
+    def simulate_chain(self, chain_length, method="custom", tau=1.0):
+        """Simulate a chain of boids updates with differentiable control using REINFORCE"""
+        # Initialize positions and velocities - these don't need gradients directly
+        positions = torch.randn(self.n_boids, self.dim) * 5.0
+        velocities = torch.randn(self.n_boids, self.dim) * 0.5
+        
+        # Policy parameters
+        policy_params = {
+            'alpha': self.alpha,
+            'beta': self.beta
+        }
+        
+        log_probs = []  # Store log probabilities for REINFORCE
+        trajectory = []
+        
+        for step in range(chain_length):
+            # Sample actions for each boid
+            actions = []
+            step_log_probs = []
             
-            gradient_variances = []
-            expected_param_count = None
+            for boid_idx in range(self.n_boids):
+                # Create state vector (position and velocity) - detach to avoid in-place issues
+                state = torch.cat([positions[boid_idx].detach(), velocities[boid_idx].detach()])
+                
+                # Sample control action
+                action, log_prob = self.sample_control(state, policy_params, method, tau)
+                actions.append(action)
+                step_log_probs.append(log_prob)
             
-            for run in range(NUM_RUNS):
-                # Different seed for each method and run combination
-                seed = run + 42 + hash(method) % 1000
-                torch.manual_seed(seed)
-                np.random.seed(seed)
-                
-                # Initialize environment
-                boids = DifferentiableBoids(NUM_AGENTS, MAX_NEIGHBORS)
-                
-                # Use a single shared policy to ensure consistent parameter count
-                shared_policy = PolicyNetwork(
-                    input_dim=STATE_DIM, 
-                    hidden_dim=HIDDEN_DIM, 
-                    output_dim=MAX_NEIGHBORS
-                ).to(device)
-                
-                config = Config()
-                agents = []
-                for agent_id in range(NUM_AGENTS):
-                    agent = BoidAgent(agent_id, shared_policy, config)
-                    agents.append(agent)
-                
-                # Random initial positions and velocities with more variation
-                positions = torch.rand(NUM_AGENTS, 2).to(device) * boids.world_size
-                velocities = (torch.randn(NUM_AGENTS, 2).to(device) * 0.5) + \
-                           (torch.rand(NUM_AGENTS, 2).to(device) - 0.5) * 0.3
-                
-                # Create optimizer
-                optimizer = torch.optim.Adam(shared_policy.parameters(), lr=LEARNING_RATE)
-                optimizer.zero_grad()
-                
-                # Simulate for chain_length steps
-                all_log_probs = []
-                total_loss = 0
-                
-                for step in range(chain_length):
-                    positions, velocities, log_probs = boids.simulate_step(
-                        positions, velocities, agents, method
-                    )
-                    all_log_probs.extend(log_probs)
-                    
-                    # Compute loss (negative flocking coherence)
-                    coherence = boids.compute_flocking_coherence(positions)
-                    step_loss = -coherence
-                    total_loss += step_loss
-                
-                # Compute gradients
-                if all_log_probs:
-                    # REINFORCE-style loss
-                    policy_loss = -sum(all_log_probs) * total_loss.detach()
-                    policy_loss.backward()
-                    
-                    # Collect gradients from shared policy
-                    gradients = []
-                    for param in shared_policy.parameters():
-                        if param.grad is not None:
-                            gradients.append(param.grad.clone().flatten())
-                    
-                    if gradients:
-                        all_grads = torch.cat(gradients)
-                        grad_numpy = all_grads.detach().cpu().numpy()
-                        
-                        # Check parameter count consistency
-                        if expected_param_count is None:
-                            expected_param_count = len(grad_numpy)
-                        elif len(grad_numpy) != expected_param_count:
-                            print(f"Warning: Parameter count mismatch. Expected {expected_param_count}, got {len(grad_numpy)}")
-                            continue
-                        
-                        gradient_variances.append(grad_numpy)
-                
-                # Clean up
-                optimizer.zero_grad()
+            # Store log probabilities for gradient computation
+            log_probs.extend(step_log_probs)
             
-            if gradient_variances and len(gradient_variances) > 1:
-                try:
-                    # Convert to numpy array - should work now with consistent shapes
-                    gradients_array = np.array(gradient_variances)
-                    print(f"  Gradient array shape: {gradients_array.shape}")
-                    
-                    # Calculate statistics
-                    mean_gradient = np.mean(gradients_array, axis=0)
-                    gradient_variance_per_param = np.var(gradients_array, axis=0)
-                    
-                    avg_mean_gradient = np.mean(np.abs(mean_gradient))
-                    avg_gradient_variance = np.mean(gradient_variance_per_param)
-                    std_gradient_variance = np.std(gradient_variance_per_param)
-                    
-                    results[method][chain_length] = {
-                        'avg_mean_gradient': avg_mean_gradient,
-                        'avg_gradient_variance': avg_gradient_variance,
-                        'std_gradient_variance': std_gradient_variance,
-                        'num_parameters': len(mean_gradient),
-                        'successful_runs': len(gradient_variances)
-                    }
-                    print(f"  Successful runs: {len(gradient_variances)}/{NUM_RUNS}")
-                    print(f"  Avg |mean gradient|: {avg_mean_gradient:.6f}")
-                    print(f"  Avg gradient variance: {avg_gradient_variance:.6f} ± {std_gradient_variance:.6f}")
-                    print(f"  Num parameters: {len(mean_gradient)}")
-                    
-                except Exception as e:
-                    print(f"  Error processing gradients: {e}")
-                    print(f"  Gradient shapes: {[g.shape for g in gradient_variances[:5]]}")
-                    results[method][chain_length] = {
-                        'avg_mean_gradient': 0.0,
-                        'avg_gradient_variance': 0.0,
-                        'std_gradient_variance': 0.0,
-                        'num_parameters': 0,
-                        'successful_runs': 0
-                    }
+            # Apply controls (this doesn't need gradients, just transforms the state)
+            velocities = self.apply_control(positions, velocities, actions)
+            
+            # Apply boids dynamics (this also doesn't need gradients through positions)
+            positions, velocities = self.boids_update(positions, velocities)
+            
+            trajectory.append((positions.clone(), velocities.clone()))
+        
+        return trajectory, torch.stack(log_probs)
+
+class GradientBenchmark:
+    def __init__(self):
+        self.boids = DifferentiableBoids(n_boids=10, dim=2)
+        self.methods = ["Learnable AUG", "Gumbel", "Stochastic AD", "Fixed AUG"]
+        self.chain_lengths = [5,10,50,100]
+        self.n_trials = 10  # Reduced for faster testing
+        
+    def compute_loss(self, trajectory):
+        """Compute loss function for the trajectory"""
+        # Target: maintain formation while moving towards center
+        target_center = torch.tensor([0.0, 0.0])
+        
+        total_loss = 0.0
+        for positions, velocities in trajectory:
+            # Distance to target center
+            center_of_mass = torch.mean(positions, dim=0)
+            center_loss = torch.norm(center_of_mass - target_center) ** 2
+            
+            # Formation maintenance (variance in pairwise distances)
+            pairwise_dists = torch.cdist(positions, positions)
+            # Only consider upper triangle to avoid double counting
+            upper_triangle = torch.triu(pairwise_dists, diagonal=1)
+            non_zero_dists = upper_triangle[upper_triangle > 0]
+            if len(non_zero_dists) > 0:
+                formation_loss = torch.var(non_zero_dists)
             else:
-                results[method][chain_length] = {
-                    'avg_mean_gradient': 0.0,
-                    'avg_gradient_variance': 0.0,
-                    'std_gradient_variance': 0.0,
-                    'num_parameters': 0,
-                    'successful_runs': len(gradient_variances) if gradient_variances else 0
-                }
-                print(f"  Insufficient gradient data: {len(gradient_variances) if gradient_variances else 0} successful runs")
+                formation_loss = torch.tensor(0.0)
+            
+            total_loss += center_loss + 0.1 * formation_loss
+        
+        return total_loss
     
-    # Print summary results
-    print("\n" + "="*60)
-    print("FINAL RESULTS SUMMARY")
-    print("="*60)
+    def measure_gradients(self, method, chain_length, n_trials):
+        """Measure gradient statistics using REINFORCE"""
+        gradients = []
+        losses = []
+        for trial in range(n_trials):
+            try:
+                # Zero gradients
+                self.boids.policy_net.zero_grad()
+                if self.boids.alpha.grad is not None:
+                    self.boids.alpha.grad.zero_()
+                if self.boids.beta.grad is not None:
+                    self.boids.beta.grad.zero_()
+                
+                # Run simulation
+                trajectory, log_probs = self.boids.simulate_chain(chain_length, method)
+                
+                # Compute loss (reward)
+                loss = self.compute_loss(trajectory)
+                losses.append(loss.detach().item())
+                # REINFORCE: multiply log probabilities by loss (negative reward)
+                # This creates the policy gradient: ∇J = E[∇log π(a|s) * R]
+                policy_loss = torch.sum(log_probs) * loss.detach()  # Detach loss to avoid second-order gradients
+                
+                # Backward pass
+                policy_loss.backward()
+                # Collect gradients
+                trial_gradients = []
+                for param in self.boids.policy_net.parameters():
+                    if param.grad is not None:
+                        trial_gradients.append(param.grad.flatten().detach().clone())
+                
+                # Also collect alpha/beta gradients if they exist
+                if self.boids.alpha.grad is not None:
+                    trial_gradients.append(self.boids.alpha.grad.flatten().detach().clone())
+                if self.boids.beta.grad is not None:
+                    trial_gradients.append(self.boids.beta.grad.flatten().detach().clone())
+                
+                if trial_gradients:
+                    gradients.append(torch.cat(trial_gradients))
+                
+            except Exception as e:
+                print(f"Error in trial {trial} for {method}, chain {chain_length}: {e}")
+                continue
+        
+        if gradients and len(gradients) > 0:
+            gradients = torch.stack(gradients)
+            grad_mean = torch.mean(gradients, dim=0)
+            grad_var = torch.var(gradients, dim=0)
+            
+            return {
+                'mean_norm': torch.norm(grad_mean).item(),
+                'mean_var': torch.mean(grad_var).item(),
+                'total_var': torch.var(gradients.flatten()).item(),
+                'n_successful_trials': len(gradients),
+                'loss_mean': np.mean(losses) if losses else 0.0,
+            }
+        else:
+            return {
+                'mean_norm': 0.0, 
+                'mean_var': 0.0, 
+                'total_var': 0.0,
+                'n_successful_trials': 0,
+            }
     
-    print(f"{'Method':<20} {'Chain Length':<12} {'Avg |Mean Grad|':<15} {'Avg Grad Var':<15} {'Std Grad Var':<15} {'Success Rate':<12}")
-    print("-" * 90)
+    def run_benchmark(self):
+        """Run the complete benchmark"""
+        results = defaultdict(lambda: defaultdict(dict))
+        
+        print("Running gradient estimator benchmark...")
+        print("Methods:", self.methods)
+        print("Chain lengths:", self.chain_lengths)
+        print("Trials per configuration:", self.n_trials)
+        print("-" * 50)
+        
+        for method in self.methods:
+            print(f"\nBenchmarking method: {method}")
+            for chain_length in self.chain_lengths:
+                print(f"  Chain length: {chain_length}")
+                
+                start_time = time.time()
+                stats = self.measure_gradients(method, chain_length, self.n_trials)
+                end_time = time.time()
+                
+                results[method][chain_length] = stats
+                results[method][chain_length]['time'] = end_time - start_time
+                
+                print(f"    Mean norm: {stats['mean_norm']:.4f}")
+                print(f"    Mean var: {stats['mean_var']:.4f}")
+                print(f"    Total var: {stats['total_var']:.4f}")
+                print(f"    Successful trials: {stats['n_successful_trials']}/{self.n_trials}")
+                print(f"    Loss mean: {stats['loss_mean']:.4f}")
+                print(f"    Time: {end_time - start_time:.2f}s")
+        
+        return results
     
-    for method in METHODS:
-        for chain_length in GRADIENT_CHAIN_LENGTHS:
-            result = results[method][chain_length]
-            success_rate = result.get('successful_runs', 0) / NUM_RUNS
-            print(f"{method:<20} {chain_length:<12} {result['avg_mean_gradient']:<15.6f} {result['avg_gradient_variance']:<15.6f} {result['std_gradient_variance']:<15.6f} {success_rate:<12.2f}")
+    def plot_results(self, results):
+        """Plot benchmark results"""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        metrics = ['mean_norm', 'mean_var', 'total_var','loss_mean']
+        titles = ['Gradient Mean Norm', 'Mean Gradient Variance', 'Total Gradient Variance','Loss Mean']
+        
+        for idx, (metric, title) in enumerate(zip(metrics, titles)):
+            ax = axes[idx // 2, idx % 2]
+            
+            for method in self.methods:
+                x_vals = self.chain_lengths
+                y_vals = [results[method][length][metric] for length in self.chain_lengths]
+                ax.plot(x_vals, y_vals, marker='o', label=method,linewidth=2)
+            
+            ax.set_xlabel('Chain Length')
+            ax.set_ylabel(title)
+            ax.set_title(title)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return fig
     
-    return results
+    def summary_table(self, results):
+        """Print summary table"""
+        print("\n" + "="*96)
+        print("GRADIENT ESTIMATOR BENCHMARK SUMMARY")
+        print("="*96)
+        
+        print(f"{'Method':<15} {'Chain':<6} {'Mean Norm':<12} {'Mean Var':<12} {'Total Var':<12} {'Loss Mean':<8}")
+        print("-" * 96)
+        
+        for method in self.methods:
+            for chain_length in self.chain_lengths:
+                stats = results[method][chain_length]
+                print(f"{method:<15} {chain_length:<6} {stats['mean_norm']:<12.4f} "
+                      f"{stats['mean_var']:<12.4f} {stats['total_var']:<12.4f} "
+                      f"{stats['loss_mean']:<8.2f}")
+            print("-" * 96)
+
+def main():
+    """Main benchmarking function"""
+    benchmark = GradientBenchmark()
+    results = benchmark.run_benchmark()
+    
+    # Print summary
+    benchmark.summary_table(results)
+    
+    # Plot results
+    fig = benchmark.plot_results(results)
+    
+    # Analysis
+    print("\n" + "="*50)
+    print("PERFORMANCE ANALYSIS")
+    print("="*50)
+    
+    # Find best method for each chain length
+    for chain_length in benchmark.chain_lengths:
+        print(f"\nChain Length {chain_length}:")
+        
+        # Compare total variance (lower is better)
+        method_vars = {method: results[method][chain_length]['total_var'] 
+                      for method in benchmark.methods}
+        best_method = min(method_vars, key=method_vars.get)
+        
+        print(f"  Best method (lowest variance): {best_method}")
+        print(f"  Variance: {method_vars[best_method]:.4f}")
+        
+        # Show relative performance
+        custom_var = method_vars.get('custom', float('inf'))
+        print(f"  Custom method variance: {custom_var:.4f}")
+        
+        if custom_var != float('inf'):
+            for method, var in method_vars.items():
+                if method != 'custom' and var > 0:
+                    improvement = ((var - custom_var) / var) * 100
+                    print(f"  vs {method}: {improvement:+.1f}% improvement")
 
 if __name__ == "__main__":
-    print("Starting Differentiable Boids Gradient Variance Experiment")
-    print(f"PyTorch version: {torch.__version__}")
-    
-    start_time = time.time()
-    results = run_gradient_variance_experiment()
-    end_time = time.time()
-    
-    print(f"\nExperiment completed in {end_time - start_time:.2f} seconds")
+    main()
