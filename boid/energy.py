@@ -83,8 +83,9 @@ class Categorical(torch.autograd.Function):
         p_safe = p.clamp(min=1e-6, max=1.0-1e-6)
         weights = (one_hot - p) / (p * (1-p)) 
         return grad_output.expand_as(p) * weights
+    
 class DifferentiableBoidsEnvironment:
-    def __init__(self, n_robots=20, world_size=10.0, dt=0.1):
+    def __init__(self, n_robots=100, world_size=100.0, dt=0.1):
         self.n_robots = n_robots
         self.world_size = world_size
         self.dt = dt
@@ -96,6 +97,10 @@ class DifferentiableBoidsEnvironment:
         self.base_consumption = 0.8  # Base energy consumption
         self.movement_cost = 0.1    # Additional cost per unit velocity
         
+        # Area exploration parameters
+        self.cell_size = 0.5  # Grid cell size for area calculation
+        self.exploration_bonus = 2.0  # Reward multiplier for new area
+        
         self.reset()
     
     def reset(self):
@@ -105,6 +110,15 @@ class DifferentiableBoidsEnvironment:
         self.energies = torch.ones(self.n_robots) * self.max_energy * 0.8
         self.alive_mask = torch.ones(self.n_robots, dtype=torch.bool)
         self.timestep = 0
+        
+        # Area exploration tracking
+        self.visited_cells = set()
+        self.total_area_explored = 0.0
+        self.area_history = []  # Track area over time
+        
+        # Initialize with starting positions
+        self._update_visited_area()
+        
         return self.get_state()
     
     def get_state(self):
@@ -184,9 +198,11 @@ class DifferentiableBoidsEnvironment:
                     alignment = velocities[j] - velocities[i]
                     neighbor_forces += params['w_alignment'] * alignment
                     
-                    # Cohesion force (move toward group center)
+                    # Cohesion force (move toward group center) - modified for exploration
                     cohesion = rel_pos / distance
-                    neighbor_forces += params['w_cohesion'] * cohesion
+                    # Reduce cohesion when energy is high to encourage exploration
+                    exploration_factor = 1.0 + (energies[i] / self.max_energy) * 0.5
+                    neighbor_forces += params['w_cohesion'] * cohesion / exploration_factor
                     
                     # Energy-based forces
                     energy_diff = energies[j] - energies[i]
@@ -196,9 +212,20 @@ class DifferentiableBoidsEnvironment:
                             neighbor_forces += params['w_energy_seek'] * energy_seek
                     
                     if energies[i] > 0.7 * self.max_energy and energy_diff < -0.2 * self.max_energy:
-                        # High energy robot avoiding low energy clusters
+                        # High energy robot avoiding low energy clusters - explore instead
                         energy_avoid = -rel_pos / distance
                         neighbor_forces += params['w_energy_avoid'] * energy_avoid
+                    
+                    # Exploration force: high-energy robots seek unexplored areas
+                    if energies[i] > 0.6 * self.max_energy:
+                        # Check if this direction leads to less explored areas
+                        future_pos = positions[i] + rel_pos * 0.1
+                        future_cell_x = int(future_pos[0].item() / self.cell_size) if hasattr(future_pos[0], 'item') else int(future_pos[0] / self.cell_size)
+                        future_cell_y = int(future_pos[1].item() / self.cell_size) if hasattr(future_pos[1], 'item') else int(future_pos[1] / self.cell_size)
+                        
+                        if (future_cell_x, future_cell_y) not in self.visited_cells:
+                            exploration_force = rel_pos / distance
+                            neighbor_forces += params.get('w_exploration', 0.3) * exploration_force
             
             forces[i] = neighbor_forces
         
@@ -236,6 +263,34 @@ class DifferentiableBoidsEnvironment:
                         energy_deltas[j] += transfer_amount * params['transfer_efficiency']
         
         return energy_deltas
+    
+    def _update_visited_area(self):
+        """Update the set of visited grid cells and calculate area"""
+        previous_area = len(self.visited_cells)
+        
+        # Add current positions of alive robots to visited cells
+        for i in range(self.n_robots):
+            if self.alive_mask[i]:
+                # Convert continuous position to discrete grid cell
+                cell_x = int(self.positions[i, 0].item() / self.cell_size)
+                cell_y = int(self.positions[i, 1].item() / self.cell_size)
+                self.visited_cells.add((cell_x, cell_y))
+        
+        # Calculate current total area
+        self.total_area_explored = len(self.visited_cells) * (self.cell_size ** 2)
+        self.area_history.append(self.total_area_explored)
+        
+        # Return number of newly explored cells this step
+        return len(self.visited_cells) - previous_area
+    
+    def get_exploration_metrics(self):
+        """Get detailed exploration metrics"""
+        return {
+            'total_area': self.total_area_explored,
+            'cells_visited': len(self.visited_cells),
+            'area_efficiency': self.total_area_explored / max(self.timestep, 1),
+            'coverage_ratio': self.total_area_explored / (self.world_size ** 2)
+        }
     
     def step(self, actions, params):
         """Execute one environment step"""
@@ -285,20 +340,46 @@ class DifferentiableBoidsEnvironment:
         self.energies = self.energies * self.alive_mask.float()
         self.velocities = self.velocities * self.alive_mask.float().unsqueeze(1)
         
+        # Update area exploration
+        new_cells_explored = self._update_visited_area()
+        
         self.timestep += 1
         
-        return self.get_state(), self.compute_reward(), self.is_done()
+        return self.get_state(), self.compute_reward(new_cells_explored), self.is_done()
     
-    def compute_reward(self):
-        """Compute collective reward"""
+    def compute_reward(self, new_cells_explored=0):
+        """Compute collective reward based on area exploration and survival"""
         n_alive = torch.sum(self.alive_mask.float())
-        energy_variance = torch.var(self.energies[self.alive_mask])
         
-        # Reward: survival + energy equity
-        survival_reward = n_alive / self.n_robots
-        equity_reward = 1.0 / (1.0 + energy_variance)
+        # Option 1: Continuous reward (for faster training)
+        if self.timestep < 500:  # During episode
+            # Reward for exploring new areas
+            exploration_reward = new_cells_explored * self.exploration_bonus
+            
+            # Reward for maintaining swarm cohesion while exploring
+            survival_multiplier = (n_alive / self.n_robots) ** 2  # Quadratic penalty for deaths
+            
+            # Energy efficiency bonus (optional)
+            avg_energy = torch.mean(self.energies[self.alive_mask]) if n_alive > 0 else 0
+            energy_bonus = 0.1 * avg_energy / self.max_energy
+            
+            return exploration_reward * survival_multiplier + energy_bonus
         
-        return survival_reward + 0.3 * equity_reward
+        # Option 2: Sparse episode-end reward (higher variance)
+        else:  # Episode end
+            # Primary reward: total area explored
+            base_reward = self.total_area_explored
+            
+            # Bonus for survival time (longer episodes allow more exploration)
+            survival_bonus = self.timestep * 0.1
+            
+            # Penalty for poor energy management (high variance = inefficient sharing)
+            if n_alive > 1:
+                energy_penalty = torch.var(self.energies[self.alive_mask]) * 0.05
+            else:
+                energy_penalty = 0
+            
+            return base_reward + survival_bonus - energy_penalty
     
     def is_done(self):
         """Check if episode is done"""
@@ -338,23 +419,23 @@ class BoidsPolicy(nn.Module):
     
     def sample_control_custom(self, state):
         logits = self.compute_control_probs(state)
-        # sample, _ = StochasticCategorical.apply(logits.unsqueeze(0), None)
+        sample, _ = StochasticCategorical.apply(logits.unsqueeze(0), None)
         # Placeholder - replace with your custom estimator
-        sample = torch.multinomial(logits, 1)
+        # sample = torch.multinomial(logits, 1)
         control_idx = sample.item()
         log_prob = torch.log(logits[control_idx] + 1e-8)
         return control_idx, log_prob
     
     def sample_control_cat(self, state, policy_params, tau=1.0):
         probs = self.compute_control_probs(state)
-        # sample, _ = LearnableStochasticCategorical.apply(
-        #     probs.unsqueeze(0),
-        #     None,
-        #     policy_params['alpha'],
-        #     policy_params['beta']
-        # )
+        sample, _ = LearnableStochasticCategorical.apply(
+            probs.unsqueeze(0),
+            None,
+            policy_params['alpha'],
+            policy_params['beta']
+        )
         # Placeholder - replace with your learnable estimator
-        sample = torch.multinomial(probs, 1)
+        # sample = torch.multinomial(probs, 1)
         control_idx = sample.item()
         log_prob = torch.log(probs[control_idx] + 1e-8)
         return control_idx, log_prob
@@ -381,7 +462,7 @@ class BoidsPolicy(nn.Module):
 
 
 class BoidsExperiment:
-    def __init__(self, n_robots=20, n_episodes=1000):
+    def __init__(self, n_robots=10, n_episodes=1000):
         self.n_robots = n_robots
         self.n_episodes = n_episodes
         self.env = DifferentiableBoidsEnvironment(n_robots)
@@ -394,6 +475,7 @@ class BoidsExperiment:
             'w_cohesion': 1.0,
             'w_energy_seek': 1.5,
             'w_energy_avoid': 0.5,
+            'w_exploration': 0.8,  
             'interaction_radius': 2.0,
             'separation_radius': 0.5,
             'transfer_radius': 1.0,
@@ -452,14 +534,17 @@ class BoidsExperiment:
             if done:
                 break
         
-        return episode_reward, log_probs, rewards
+        # Get final exploration metrics
+        exploration_metrics = self.env.get_exploration_metrics()
+        
+        return episode_reward, log_probs, rewards, exploration_metrics
     
     def compute_gradient_variance(self, method, n_trials=10):
         """Compute gradient variance for given method"""
         gradients = []
         
         for trial in range(n_trials):
-            episode_reward, log_probs, rewards = self.run_episode(method)
+            episode_reward, log_probs, rewards, _ = self.run_episode(method)
             
             # Compute policy gradient
             policy_loss = 0
@@ -496,11 +581,13 @@ class BoidsExperiment:
             rewards = []
             variances = []
             times = []
+            exploration_areas = []
+            coverage_ratios = []
             
             for episode in range(n_episodes_per_method):
                 start_time = time.time()
                 
-                episode_reward, _, _ = self.run_episode(method)
+                episode_reward, _, _, _ = self.run_episode(method)
                 rewards.append(episode_reward)
                 
                 # Compute gradient variance every 10 episodes
@@ -510,7 +597,7 @@ class BoidsExperiment:
                 
                 times.append(time.time() - start_time)
                 
-                if episode % 20 == 0:
+                if episode % 10 == 0:
                     print(f"  Episode {episode}, Avg Reward: {np.mean(rewards[-20:]):.3f}")
             
             results[method] = {
@@ -571,7 +658,7 @@ def main():
     print("Starting Differentiable Boids Energy Experiment...")
     
     # Initialize experiment
-    experiment = BoidsExperiment(n_robots=15, n_episodes=200)
+    experiment = BoidsExperiment(n_robots=100, n_episodes=100)
     
     # Methods to benchmark
     methods = [
@@ -592,8 +679,8 @@ def main():
     for method, data in results.items():
         print(f"\n{method}:")
         print(f"  Average Reward: {data['avg_reward']:.4f}")
-        print(f"  Gradient Variance: {data['avg_variance']:.6f}")
-        print(f"  Computation Time: {data['avg_time']:.4f}s")
+        # print(f"  Gradient Variance: {data['avg_variance']:.6f}")
+        # print(f"  Computation Time: {data['avg_time']:.4f}s")
     
     # Plot results
     experiment.plot_results(results)
