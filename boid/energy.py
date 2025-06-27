@@ -162,7 +162,7 @@ class DifferentiableBoidsEnvironment:
             while len(neighbor_info) < 9:  # 3 neighbors * 3 features
                 neighbor_info.append(0.0)
             
-            robot_state = torch.cat([local_state, torch.tensor(neighbor_info[:9])])
+            robot_state = torch.cat([local_state, torch.tensor(neighbor_info[:9], device=device)])
             states.append(robot_state)
         
         return torch.stack(states)  # [n_robots, state_dim]
@@ -241,7 +241,7 @@ class DifferentiableBoidsEnvironment:
     def compute_energy_transfers(self, positions, energies, alive_mask, params):
         """Compute energy transfers between nearby robots (vectorized)"""
         n = positions.shape[0]
-        energy_deltas = torch.zeros(n)
+        energy_deltas = torch.zeros(n,device=device)
 
         # Pairwise distances
         rel_pos = positions.unsqueeze(1) - positions.unsqueeze(0)
@@ -597,7 +597,7 @@ class BoidsExperiment:
                 times.append(time.time() - start_time)
                 
                 if episode % 10 == 0:
-                    print(f"  Episode {episode}, Avg Reward: {np.mean(rewards[-20:]):.3f}")
+                    print(f"  Episode {episode}, Avg Reward: {np.mean(torch.tensor(rewards[-20:]).cpu().numpy()):.3f}")
             
             results[method] = {
                 'rewards': rewards,
