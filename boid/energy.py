@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Placeholder imports for your custom estimators
 # from your_estimators import StochasticCategorical, LearnableStochasticCategorical
@@ -105,10 +106,10 @@ class DifferentiableBoidsEnvironment:
     
     def reset(self):
         """Reset environment to initial state"""
-        self.positions = torch.randn(self.n_robots, 2) * self.world_size * 0.3
-        self.velocities = torch.zeros(self.n_robots, 2)
-        self.energies = torch.ones(self.n_robots) * self.max_energy * 0.8
-        self.alive_mask = torch.ones(self.n_robots, dtype=torch.bool)
+        self.positions = (torch.randn(self.n_robots, 2) * self.world_size * 0.3).to(device)
+        self.velocities = torch.zeros(self.n_robots, 2,device = device)
+        self.energies = torch.ones(self.n_robots,device=device) * self.max_energy * 0.8
+        self.alive_mask = torch.ones(self.n_robots, dtype=torch.bool,device=device)
         self.timestep = 0
         
         # Area exploration tracking
@@ -167,120 +168,118 @@ class DifferentiableBoidsEnvironment:
         return torch.stack(states)  # [n_robots, state_dim]
     
     def compute_boids_forces(self, positions, velocities, energies, alive_mask, params):
-        """Compute boids forces with energy considerations"""
+        """Compute boids forces with energy considerations (vectorized)"""
         n = positions.shape[0]
         forces = torch.zeros_like(positions)
-        
-        for i in range(n):
-            if not alive_mask[i]:
-                continue
-                
-            neighbors = []
-            neighbor_forces = torch.zeros(2)
-            
-            for j in range(n):
-                if i == j or not alive_mask[j]:
-                    continue
-                    
-                rel_pos = positions[j] - positions[i]
-                distance = torch.norm(rel_pos) + 1e-8
-                
-                # Only consider neighbors within interaction radius
-                if distance < params['interaction_radius']:
-                    neighbors.append(j)
-                    
-                    # Separation force (avoid collision)
-                    if distance < params['separation_radius']:
-                        separation = -rel_pos / (distance ** 2)
-                        neighbor_forces += params['w_separation'] * separation
-                    
-                    # Alignment force (match velocity)
-                    alignment = velocities[j] - velocities[i]
-                    neighbor_forces += params['w_alignment'] * alignment
-                    
-                    # Cohesion force (move toward group center) - modified for exploration
-                    cohesion = rel_pos / distance
-                    # Reduce cohesion when energy is high to encourage exploration
-                    exploration_factor = 1.0 + (energies[i] / self.max_energy) * 0.5
-                    neighbor_forces += params['w_cohesion'] * cohesion / exploration_factor
-                    
-                    # Energy-based forces
-                    energy_diff = energies[j] - energies[i]
-                    if energies[i] < 0.3 * self.max_energy:  # Low energy
-                        if energy_diff > 0:  # Neighbor has more energy
-                            energy_seek = rel_pos / distance
-                            neighbor_forces += params['w_energy_seek'] * energy_seek
-                    
-                    if energies[i] > 0.7 * self.max_energy and energy_diff < -0.2 * self.max_energy:
-                        # High energy robot avoiding low energy clusters - explore instead
-                        energy_avoid = -rel_pos / distance
-                        neighbor_forces += params['w_energy_avoid'] * energy_avoid
-                    
-                    # Exploration force: high-energy robots seek unexplored areas
-                    if energies[i] > 0.6 * self.max_energy:
-                        # Check if this direction leads to less explored areas
-                        future_pos = positions[i] + rel_pos * 0.1
-                        future_cell_x = int(future_pos[0].item() / self.cell_size) if hasattr(future_pos[0], 'item') else int(future_pos[0] / self.cell_size)
-                        future_cell_y = int(future_pos[1].item() / self.cell_size) if hasattr(future_pos[1], 'item') else int(future_pos[1] / self.cell_size)
-                        
-                        if (future_cell_x, future_cell_y) not in self.visited_cells:
-                            exploration_force = rel_pos / distance
-                            neighbor_forces += params.get('w_exploration', 0.3) * exploration_force
-            
-            forces[i] = neighbor_forces
-        
+
+        # Mask for alive robots
+        alive_indices = torch.where(alive_mask)[0]
+        if len(alive_indices) == 0:
+            return forces
+
+        # Pairwise relative positions and distances
+        rel_pos = positions.unsqueeze(1) - positions.unsqueeze(0)  # [n, n, 2]
+        distances = torch.norm(rel_pos, dim=2) + 1e-8  # [n, n]
+
+        # Mask out self and dead robots
+        mask = alive_mask.unsqueeze(0) & alive_mask.unsqueeze(1)
+        mask.fill_diagonal_(False)
+
+        # Interaction mask
+        interaction_mask = (distances < params['interaction_radius']) & mask
+
+        # Separation
+        separation_mask = (distances < params['separation_radius']) & mask
+        separation = -rel_pos / (distances.unsqueeze(-1) ** 2)
+        separation[~separation_mask.unsqueeze(-1).expand_as(separation)] = 0
+        separation_force = params['w_separation'] * separation.sum(dim=1)
+
+        # Alignment
+        vel_diff = velocities.unsqueeze(1) - velocities.unsqueeze(0)
+        alignment = vel_diff.clone()
+        alignment[~interaction_mask.unsqueeze(-1).expand_as(alignment)] = 0
+        alignment_force = params['w_alignment'] * alignment.sum(dim=1)
+
+        # Cohesion (with exploration factor)
+        exploration_factor = 1.0 + (energies / self.max_energy) * 0.5
+        cohesion = rel_pos / distances.unsqueeze(-1)
+        cohesion[~interaction_mask.unsqueeze(-1).expand_as(cohesion)] = 0
+        cohesion_force = params['w_cohesion'] * (cohesion.sum(dim=1).T / exploration_factor).T
+
+        # Energy-based forces (vectorized for low/high energy)
+        energy_diff = energies.unsqueeze(1) - energies.unsqueeze(0)
+        low_energy_mask = (energies < 0.3 * self.max_energy).unsqueeze(1) & (energy_diff < 0)
+        energy_seek = rel_pos / distances.unsqueeze(-1)
+        energy_seek[~(low_energy_mask & interaction_mask).unsqueeze(-1).expand_as(energy_seek)] = 0
+        energy_seek_force = params['w_energy_seek'] * energy_seek.sum(dim=1)
+
+        high_energy_mask = (energies > 0.7 * self.max_energy).unsqueeze(1) & (energy_diff > 0.2 * self.max_energy)
+        energy_avoid = -rel_pos / distances.unsqueeze(-1)
+        energy_avoid[~(high_energy_mask & interaction_mask).unsqueeze(-1).expand_as(energy_avoid)] = 0
+        energy_avoid_force = params['w_energy_avoid'] * energy_avoid.sum(dim=1)
+
+        # Exploration force (approximate: only for high energy robots)
+        exploration_force = torch.zeros_like(positions)
+        high_energy = (energies > 0.6 * self.max_energy)
+        if high_energy.any():
+            # For each high energy robot, check if neighbor direction leads to unexplored cell
+            for i in torch.where(high_energy)[0]:
+                for j in range(n):
+                    if i == j or not alive_mask[j] or not interaction_mask[i, j]:
+                        continue
+                    future_pos = positions[i] + rel_pos[i, j] * 0.1
+                    future_cell_x = int(future_pos[0].item() / self.cell_size)
+                    future_cell_y = int(future_pos[1].item() / self.cell_size)
+                    if (future_cell_x, future_cell_y) not in self.visited_cells:
+                        exploration_force[i] += params.get('w_exploration', 0.3) * rel_pos[i, j] / distances[i, j]
+
+        # Sum all forces
+        forces = separation_force + alignment_force + cohesion_force + energy_seek_force + energy_avoid_force + exploration_force
+        forces[~alive_mask] = 0
         return forces
     
     def compute_energy_transfers(self, positions, energies, alive_mask, params):
-        """Compute energy transfers between nearby robots"""
+        """Compute energy transfers between nearby robots (vectorized)"""
         n = positions.shape[0]
         energy_deltas = torch.zeros(n)
-        
-        for i in range(n):
-            if not alive_mask[i]:
-                continue
-                
-            for j in range(n):
-                if i == j or not alive_mask[j]:
-                    continue
-                    
-                distance = torch.norm(positions[j] - positions[i])
-                
-                # Energy transfer only at close range
-                if distance < params['transfer_radius']:
-                    energy_diff = energies[i] - energies[j]
-                    
-                    # Transfer from high to low energy robot
-                    if energy_diff > params['transfer_threshold']:
-                        # Soft transfer decision
-                        transfer_prob = torch.sigmoid(energy_diff - params['transfer_threshold'])
-                        proximity_weight = torch.exp(-distance / params['transfer_radius'])
-                        
-                        transfer_amount = params['transfer_rate'] * transfer_prob * proximity_weight
-                        transfer_amount = torch.min(transfer_amount, energies[i] * 0.1)  # Max 10% of energy
-                        
-                        energy_deltas[i] -= transfer_amount
-                        energy_deltas[j] += transfer_amount * params['transfer_efficiency']
-        
+
+        # Pairwise distances
+        rel_pos = positions.unsqueeze(1) - positions.unsqueeze(0)
+        distances = torch.norm(rel_pos, dim=2)
+        mask = alive_mask.unsqueeze(0) & alive_mask.unsqueeze(1)
+        mask.fill_diagonal_(False)
+
+        # Transfer mask
+        transfer_mask = (distances < params['transfer_radius']) & mask
+        energy_diff = energies.unsqueeze(1) - energies.unsqueeze(0)
+        can_transfer = (energy_diff > params['transfer_threshold']) & transfer_mask
+
+        # Transfer probability and amount
+        transfer_prob = torch.sigmoid(energy_diff - params['transfer_threshold'])
+        proximity_weight = torch.exp(-distances / params['transfer_radius'])
+        transfer_amount = params['transfer_rate'] * transfer_prob * proximity_weight
+        max_transfer = (energies.unsqueeze(1) * 0.1)
+        transfer_amount = torch.min(transfer_amount, max_transfer)
+        transfer_amount = transfer_amount * can_transfer
+
+        # Subtract from i, add to j
+        energy_deltas -= transfer_amount.sum(dim=1)
+        energy_deltas += (transfer_amount * params['transfer_efficiency']).sum(dim=0)
+        energy_deltas[~alive_mask] = 0
         return energy_deltas
     
     def _update_visited_area(self):
-        """Update the set of visited grid cells and calculate area"""
+        """Update the set of visited grid cells and calculate area (vectorized)"""
         previous_area = len(self.visited_cells)
-        
-        # Add current positions of alive robots to visited cells
-        for i in range(self.n_robots):
-            if self.alive_mask[i]:
-                # Convert continuous position to discrete grid cell
-                cell_x = int(self.positions[i, 0].item() / self.cell_size)
-                cell_y = int(self.positions[i, 1].item() / self.cell_size)
-                self.visited_cells.add((cell_x, cell_y))
-        
-        # Calculate current total area
+        alive_indices = torch.where(self.alive_mask)[0]
+        if len(alive_indices) > 0:
+            pos = self.positions[alive_indices]
+            cell_x = (pos[:, 0] / self.cell_size).long()
+            cell_y = (pos[:, 1] / self.cell_size).long()
+            cells = set(zip(cell_x.tolist(), cell_y.tolist()))
+            self.visited_cells.update(cells)
         self.total_area_explored = len(self.visited_cells) * (self.cell_size ** 2)
         self.area_history.append(self.total_area_explored)
-        
-        # Return number of newly explored cells this step
         return len(self.visited_cells) - previous_area
     
     def get_exploration_metrics(self):
@@ -295,7 +294,7 @@ class DifferentiableBoidsEnvironment:
     def step(self, actions, params):
         """Execute one environment step"""
         # Convert discrete actions to continuous force multipliers
-        action_multipliers = torch.tensor([0.5, 0.8, 1.0, 1.2, 1.5])[actions]  # 5 discrete actions
+        action_multipliers = torch.tensor([0.5, 0.8, 1.0, 1.2, 1.5],device=device)[actions]  # 5 discrete actions
         
         # Compute boids forces
         forces = self.compute_boids_forces(
@@ -396,7 +395,7 @@ class BoidsPolicy(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, n_actions)
         )
-        
+        self.to(device)
     def forward(self, state):
         return self.network(state)
     
@@ -486,8 +485,8 @@ class BoidsExperiment:
         
         # Policy parameters for learnable estimators
         self.policy_params = {
-            'alpha': nn.Parameter(torch.tensor(1.0)),
-            'beta': nn.Parameter(torch.tensor(1.0))
+            'alpha': nn.Parameter(torch.tensor(1.0,device=device)),
+            'beta': nn.Parameter(torch.tensor(1.0,device=device))
         }
         
         self.optimizer = torch.optim.Adam(
@@ -513,16 +512,16 @@ class BoidsExperiment:
             for i in range(self.n_robots):
                 if self.env.alive_mask[i]:
                     action, log_prob = self.policy.sample_control(
-                        state[i], method, self.policy_params
+                        state[i].to(device), method, self.policy_params
                     )
                     actions.append(action)
                     episode_log_probs.append(log_prob)
                 else:
                     actions.append(0)  # Dead robot action
-                    episode_log_probs.append(torch.tensor(0.0))
+                    episode_log_probs.append(torch.tensor(0.0,device=device))
             
             # Execute step
-            actions_tensor = torch.tensor(actions)
+            actions_tensor = torch.tensor(actions,device=device)
             next_state, reward, done = self.env.step(actions_tensor, params)
             
             episode_reward += reward
@@ -656,9 +655,9 @@ class BoidsExperiment:
 def main():
     """Main experiment runner"""
     print("Starting Differentiable Boids Energy Experiment...")
-    
+    print(f"Using device {device}")
     # Initialize experiment
-    experiment = BoidsExperiment(n_robots=100, n_episodes=100)
+    experiment = BoidsExperiment(n_robots=10, n_episodes=100)
     
     # Methods to benchmark
     methods = [
