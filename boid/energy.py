@@ -11,13 +11,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class StochasticCategorical(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p, uncertainty_in=None):
-        result = torch.multinomial(p, num_samples=1)
+        # p can be [batch_size, n_categories] now
+        if p.dim() == 1:
+            p = p.unsqueeze(0)
+        
+        result = torch.multinomial(p, num_samples=1)  # [batch_size, 1]
         one_hot = torch.zeros_like(p)
         one_hot.scatter_(-1, result, 1.0)
+        
         var_chosen = (1.0 - p) / p.clamp(min=1e-10)
         var_not_chosen = p / (1.0 - p).clamp(min=1e-10)
         op_variance = one_hot * var_chosen + (1 - one_hot) * var_not_chosen
         uncertainty_out = uncertainty_in + op_variance if uncertainty_in is not None else op_variance
+        
         ctx.save_for_backward(result, p, uncertainty_out)
         return result, uncertainty_out
 
@@ -26,11 +32,13 @@ class StochasticCategorical(torch.autograd.Function):
         result, p, uncertainty = ctx.saved_tensors
         one_hot = torch.zeros_like(p)
         one_hot.scatter_(-1, result, 1.0)
+        
         w_chosen = (1.0 / p) / 2
         w_non_chosen = (1.0 / (1.0 - p)) / 2
         confidence = 1.0 / (1.0 + uncertainty.clamp(min=1e-6))
         adjusted_ws = (one_hot * w_chosen + (1 - one_hot) * w_non_chosen) * confidence
-        adjusted_ws = adjusted_ws / adjusted_ws.mean().clamp(min=1e-10)
+        adjusted_ws = adjusted_ws / adjusted_ws.mean(dim=-1, keepdim=True).clamp(min=1e-10)
+        
         grad_p = grad_output.expand_as(p) * adjusted_ws
         return grad_p, None
 
@@ -93,14 +101,22 @@ class DifferentiableBoidsEnvironment:
         self.max_energy = 100.0
         self.death_threshold = 0.1
         
-        # Environment parameters
-        self.harvesting_rate = 0.5  # Energy gained per timestep
-        self.base_consumption = 0.8  # Base energy consumption
-        self.movement_cost = 0.1    # Additional cost per unit velocity
+        # Pre-allocate tensors to avoid memory allocation overhead
+        self.temp_forces = torch.zeros(n_robots, 2, device=device)
+        self.temp_rel_pos = torch.zeros(n_robots, n_robots, 2, device=device)
+        self.temp_distances = torch.zeros(n_robots, n_robots, device=device)
         
-        # Area exploration parameters
-        self.cell_size = 0.5  # Grid cell size for area calculation
-        self.exploration_bonus = 2.0  # Reward multiplier for new area
+        # Environment parameters
+        self.harvesting_rate = 0.5
+        self.base_consumption = 0.8
+        self.movement_cost = 0.1
+        
+        # Vectorized area tracking
+        self.cell_size = 0.5
+        self.exploration_bonus = 2.0
+        grid_size = int(world_size / self.cell_size) + 1
+        self.visited_grid = torch.zeros(grid_size, grid_size, dtype=torch.bool, device=device)
+        self.grid_size = grid_size
         
         self.reset()
     
@@ -269,18 +285,22 @@ class DifferentiableBoidsEnvironment:
         return energy_deltas
     
     def _update_visited_area(self):
-        """Update the set of visited grid cells and calculate area (vectorized)"""
-        previous_area = len(self.visited_cells)
+        """Vectorized area calculation - NO Python loops or sets"""
+        prev_total = torch.sum(self.visited_grid.float())
+        
         alive_indices = torch.where(self.alive_mask)[0]
         if len(alive_indices) > 0:
             pos = self.positions[alive_indices]
-            cell_x = (pos[:, 0] / self.cell_size).long()
-            cell_y = (pos[:, 1] / self.cell_size).long()
-            cells = set(zip(cell_x.tolist(), cell_y.tolist()))
-            self.visited_cells.update(cells)
-        self.total_area_explored = len(self.visited_cells) * (self.cell_size ** 2)
-        self.area_history.append(self.total_area_explored)
-        return len(self.visited_cells) - previous_area
+            cell_x = torch.clamp((pos[:, 0] / self.cell_size).long(), 0, self.grid_size-1)
+            cell_y = torch.clamp((pos[:, 1] / self.cell_size).long(), 0, self.grid_size-1)
+            
+            # Mark visited cells (vectorized)
+            self.visited_grid[cell_x, cell_y] = True
+        
+        new_total = torch.sum(self.visited_grid.float())
+        self.total_area_explored = new_total * (self.cell_size ** 2)
+        
+        return (new_total - prev_total).item() 
     
     def get_exploration_metrics(self):
         """Get detailed exploration metrics"""
@@ -292,39 +312,44 @@ class DifferentiableBoidsEnvironment:
         }
     
     def step(self, actions, params):
-        """Execute one environment step"""
-        # Convert discrete actions to continuous force multipliers
-        action_multipliers = torch.tensor([0.5, 0.8, 1.0, 1.2, 1.5],device=device)[actions]  # 5 discrete actions
+        """
+        Optimized step function - actions is now a tensor [n_robots]
+        NO LOOPS for action processing!
+        """
+        # actions is already a tensor [n_robots] with values 0-4
         
-        # Compute boids forces
+        # Convert discrete actions to continuous force multipliers (vectorized)
+        action_multipliers = torch.tensor([0.5, 0.8, 1.0, 1.2, 1.5], device=device)[actions]  # [n_robots]
+        
+        # Compute boids forces (already vectorized)
         forces = self.compute_boids_forces(
             self.positions, self.velocities, self.energies, self.alive_mask, params
-        )
+        )  # [n_robots, 2]
         
-        # Apply action multipliers to forces
-        forces = forces * action_multipliers.unsqueeze(1)
+        # Apply action multipliers (vectorized)
+        forces = forces * action_multipliers.unsqueeze(1)  # [n_robots, 2]
         
-        # Update velocities and positions
+        # Update velocities and positions (vectorized)
         self.velocities = self.velocities + forces * self.dt
         
-        # Velocity limits
+        # Velocity limits (vectorized)
         max_velocity = 2.0
         velocity_norms = torch.norm(self.velocities, dim=1, keepdim=True)
         velocity_norms = torch.clamp(velocity_norms, min=1e-8)
         self.velocities = self.velocities * torch.clamp(velocity_norms, max=max_velocity) / velocity_norms
         
-        # Update positions
+        # Update positions (vectorized)
         self.positions = self.positions + self.velocities * self.dt
         
-        # Boundary conditions (toroidal world)
+        # Boundary conditions (vectorized)
         self.positions = self.positions % self.world_size
         
-        # Compute energy transfers
+        # Compute energy transfers (already vectorized)
         energy_transfers = self.compute_energy_transfers(
             self.positions, self.energies, self.alive_mask, params
         )
         
-        # Update energies
+        # Update energies (vectorized)
         movement_costs = self.movement_cost * torch.norm(self.velocities, dim=1)
         self.energies = (self.energies 
                         + self.harvesting_rate * self.dt 
@@ -332,14 +357,14 @@ class DifferentiableBoidsEnvironment:
                         - movement_costs * self.dt
                         + energy_transfers * self.dt)
         
-        # Update alive mask
+        # Update alive mask (vectorized)
         self.alive_mask = self.energies > self.death_threshold
         
-        # Zero out dead robots
+        # Zero out dead robots (vectorized)
         self.energies = self.energies * self.alive_mask.float()
         self.velocities = self.velocities * self.alive_mask.float().unsqueeze(1)
         
-        # Update area exploration
+        # Update area exploration (optimized)
         new_cells_explored = self._update_visited_area()
         
         self.timestep += 1
@@ -396,68 +421,69 @@ class BoidsPolicy(nn.Module):
             nn.Linear(hidden_dim, n_actions)
         )
         self.to(device)
+    
     def forward(self, state):
         return self.network(state)
     
-    def compute_control_probs(self, state):
-        """Compute action probabilities"""
-        logits = self.forward(state)
+    def compute_control_probs_batch(self, states):
+        """Compute action probabilities for batch of states"""
+        # states: [batch_size, state_dim] or [n_robots, state_dim]
+        logits = self.forward(states)  # [batch_size, n_actions]
         return F.softmax(logits, dim=-1)
     
-    def compute_control_logits(self, state):
-        """Compute action logits"""
-        return self.forward(state)
-    
-    def sample_control_stoch(self, state):
-        """Uses the custom differentiable categorical estimator."""
-        probs = self.compute_control_probs(state)
-        sample = Categorical.apply(probs.unsqueeze(0))
-        control_idx = int(sample.item())
-        log_prob = torch.log(probs[control_idx] + 1e-8)
-        return control_idx, log_prob
-    
-    def sample_control_custom(self, state):
-        logits = self.compute_control_probs(state)
-        sample, _ = StochasticCategorical.apply(logits.unsqueeze(0), None)
-        # Placeholder - replace with your custom estimator
-        # sample = torch.multinomial(logits, 1)
-        control_idx = sample.item()
-        log_prob = torch.log(logits[control_idx] + 1e-8)
-        return control_idx, log_prob
-    
-    def sample_control_cat(self, state, policy_params, tau=1.0):
-        probs = self.compute_control_probs(state)
-        sample, _ = LearnableStochasticCategorical.apply(
-            probs.unsqueeze(0),
-            None,
-            policy_params['alpha'],
-            policy_params['beta']
-        )
-        # Placeholder - replace with your learnable estimator
-        # sample = torch.multinomial(probs, 1)
-        control_idx = sample.item()
-        log_prob = torch.log(probs[control_idx] + 1e-8)
-        return control_idx, log_prob
-    
-    def sample_control_gumbel(self, state, tau=1.0):
-        """Gumbel softmax baseline"""
-        logits = self.compute_control_logits(state)
-        gumbel_samples = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
-        control_idx = torch.argmax(gumbel_samples, dim=-1).item()
-        probs = F.softmax(logits, dim=-1)
-        log_prob = torch.log(probs[control_idx] + 1e-8)
-        return control_idx, log_prob
-    
-    def sample_control(self, state, method, policy_params=None, tau=1.0):
-        """Main sampling function using your interface"""
-        if method == "Learnable AUG":
-            return self.sample_control_cat(state, policy_params, tau)
+    def sample_control_batch(self, states, alive_mask, method="Stochastic AD", policy_params=None, tau=1.0):
+        """
+        Sample actions for ALL robots in a single batch operation
+        
+        Args:
+            states: [n_robots, state_dim] - states for all robots
+            alive_mask: [n_robots] - boolean mask for alive robots
+            method: sampling method
+            
+        Returns:
+            actions: [n_robots] - integer actions (0 for dead robots)
+            log_probs: [n_robots] - log probabilities (0 for dead robots)
+        """
+        batch_size = states.shape[0]
+        
+        # Get probabilities for all robots at once
+        probs = self.compute_control_probs_batch(states)  # [n_robots, n_actions]
+        
+        if method == "Stochastic AD":
+            # Use your custom categorical for all robots simultaneously
+            samples, _ = StochasticCategorical.apply(probs, None)  # [n_robots, 1]
+            samples = samples.squeeze(-1)  # [n_robots]
+            
+            # Compute log probabilities using gather (no .item() calls!)
+            log_probs = torch.log(probs.gather(1, samples.unsqueeze(1)) + 1e-8).squeeze(1)
+            
+        elif method == "Learnable AUG":
+            samples, _ = LearnableStochasticCategorical.apply(
+                probs, None, 
+                policy_params['alpha'], 
+                policy_params['beta']
+            )
+            samples = samples.squeeze(-1)
+            log_probs = torch.log(probs.gather(1, samples.unsqueeze(1)) + 1e-8).squeeze(1)
+            
         elif method == "Gumbel":
-            return self.sample_control_gumbel(state, tau)
-        elif method == "Stochastic AD":
-            return self.sample_control_stoch(state)
-        else:
-            return self.sample_control_custom(state)
+            # Gumbel softmax for all robots
+            logits = self.forward(states)
+            gumbel_samples = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
+            samples = torch.argmax(gumbel_samples, dim=-1)
+            log_probs = torch.log(probs.gather(1, samples.unsqueeze(1)) + 1e-8).squeeze(1)
+            
+        else:  # Fixed AUG
+            samples, _ = StochasticCategorical.apply(probs, None)
+            samples = samples.squeeze(-1)
+            log_probs = torch.log(probs.gather(1, samples.unsqueeze(1)) + 1e-8).squeeze(1)
+        
+        # Zero out dead robots (keep everything on GPU)
+        samples = samples * alive_mask.long()
+        log_probs = log_probs * alive_mask.float()
+        
+        return samples, log_probs
+
 
 
 class BoidsExperiment:
@@ -495,48 +521,47 @@ class BoidsExperiment:
         )
         
     def run_episode(self, method, params=None):
-        """Run single episode with given sampling method"""
+        """Optimized episode with full batching"""
         if params is None:
             params = self.default_params
             
-        state = self.env.reset()
+        state = self.env.reset()  # [n_robots, state_dim]
         episode_reward = 0
-        log_probs = []
-        rewards = []
+        all_log_probs = []
+        all_rewards = []
         
         while not self.env.is_done():
-            actions = []
-            episode_log_probs = []
+            # BATCH PROCESS ALL ROBOTS AT ONCE - NO LOOPS!
+            actions, log_probs = self.policy.sample_control_batch(
+                state,  # [n_robots, state_dim] 
+                self.env.alive_mask,  # [n_robots]
+                method, 
+                self.policy_params
+            )
+            # actions: [n_robots], log_probs: [n_robots] - all on GPU!
             
-            # Sample actions for all alive robots
-            for i in range(self.n_robots):
-                if self.env.alive_mask[i]:
-                    action, log_prob = self.policy.sample_control(
-                        state[i].to(device), method, self.policy_params
-                    )
-                    actions.append(action)
-                    episode_log_probs.append(log_prob)
-                else:
-                    actions.append(0)  # Dead robot action
-                    episode_log_probs.append(torch.tensor(0.0,device=device))
-            
-            # Execute step
-            actions_tensor = torch.tensor(actions,device=device)
-            next_state, reward, done = self.env.step(actions_tensor, params)
+            # Execute environment step
+            next_state, reward, done = self.env.step(actions, params)
             
             episode_reward += reward
-            log_probs.extend(episode_log_probs)
-            rewards.append(reward)
+            all_log_probs.append(log_probs)
+            all_rewards.append(reward)
             
             state = next_state
             
             if done:
                 break
         
-        # Get final exploration metrics
-        exploration_metrics = self.env.get_exploration_metrics()
+        # Stack all log probs - keep on GPU
+        if all_log_probs:
+            log_probs_tensor = torch.stack(all_log_probs)  # [timesteps, n_robots]
+            rewards_tensor = torch.tensor(all_rewards, device=device)  # [timesteps]
+        else:
+            log_probs_tensor = torch.empty(0, device=device)
+            rewards_tensor = torch.empty(0, device=device)
         
-        return episode_reward, log_probs, rewards, exploration_metrics
+        exploration_metrics = self.env.get_exploration_metrics()
+        return episode_reward, log_probs_tensor, rewards_tensor, exploration_metrics
     
     def compute_gradient_variance(self, method, n_trials=10):
         """Compute gradient variance for given method"""
@@ -590,18 +615,17 @@ class BoidsExperiment:
                 rewards.append(episode_reward)
                 
                 # Compute gradient variance every 10 episodes
-                if episode % 10 == 0:
-                    variance = self.compute_gradient_variance(method, n_trials=5)
-                    variances.append(variance)
+                # if episode % 10 == 0:
+                #     variance = self.compute_gradient_variance(method, n_trials=5)
+                #     variances.append(variance)
                 
                 times.append(time.time() - start_time)
                 
                 if episode % 10 == 0:
-                    print(f"  Episode {episode}, Avg Reward: {np.mean(torch.tensor(rewards[-20:]).cpu().numpy()):.3f}")
+                    print(f"  Episode {episode}, Avg Reward: {np.mean(torch.tensor(rewards[-20:]).cpu().numpy()):.3f}, time: {times[-1]:.2f}s")
             
             results[method] = {
                 'rewards': rewards,
-                'variances': variances,
                 'times': times,
                 'avg_reward': np.mean(torch.tensor(rewards).cpu().numpy()),
                 'avg_variance': np.mean(variances),
@@ -657,7 +681,7 @@ def main():
     print("Starting Differentiable Boids Energy Experiment...")
     print(f"Using device {device}")
     # Initialize experiment
-    experiment = BoidsExperiment(n_robots=10, n_episodes=100)
+    experiment = BoidsExperiment(n_robots=100, n_episodes=100)
     
     # Methods to benchmark
     methods = [
@@ -668,7 +692,7 @@ def main():
     ]
     
     # Run benchmark
-    results = experiment.benchmark_methods(methods, n_episodes_per_method=10)
+    results = experiment.benchmark_methods(methods, n_episodes_per_method=50)
     
     # Print results summary
     print("\n" + "="*50)
