@@ -603,7 +603,7 @@ class BoidsExperiment:
                 'rewards': rewards,
                 'variances': variances,
                 'times': times,
-                'avg_reward': np.mean(rewards),
+                'avg_reward': np.mean(torch.tensor(rewards).cpu().numpy()),
                 'avg_variance': np.mean(variances),
                 'avg_time': np.mean(times)
             }
@@ -668,7 +668,7 @@ def main():
     ]
     
     # Run benchmark
-    results = experiment.benchmark_methods(methods, n_episodes_per_method=50)
+    results = experiment.benchmark_methods(methods, n_episodes_per_method=10)
     
     # Print results summary
     print("\n" + "="*50)
@@ -682,7 +682,7 @@ def main():
         # print(f"  Computation Time: {data['avg_time']:.4f}s")
     
     # Plot results
-    experiment.plot_results(results)
+    # experiment.plot_results(results)
     
     return results
 
