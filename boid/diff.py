@@ -137,31 +137,24 @@ class DifferentiableBoidsEnv:
     def step(self, action_probs):
         action_probs = action_probs.reshape(self.batch_size, self.num_agents, -1)
         
-        # Convert action probabilities to action vectors
         action_vectors = torch.einsum('bna,ad->bnd', action_probs, self.action_vectors)
         
-        # Apply alive mask - FIXED: Use differentiable masking
         alive_mask = self.alive.unsqueeze(-1).float()
         masked_actions = action_vectors * alive_mask
         
-        # Update velocities with momentum
         self.velocities = 0.8 * self.velocities + 0.2 * masked_actions * self.max_speed
         
-        # Clamp velocity magnitude
         vel_magnitude = torch.norm(self.velocities, dim=-1, keepdim=True)
         vel_magnitude_clamped = torch.clamp(vel_magnitude, max=self.max_speed)
         self.velocities = self.velocities * (vel_magnitude_clamped / (vel_magnitude + 1e-8))
         
-        # Update positions
         self.positions = self.positions + self.velocities * alive_mask
         self.positions = self.positions % self.world_size
         
-        # Update energy - FIXED: Use differentiable energy updates
         movement_cost = torch.norm(self.velocities, dim=-1) * self.energy_decay
         self.energies = self.energies - movement_cost * self.alive.float()
         
-        # Update alive status - FIXED: Use differentiable alive updates
-        # Instead of boolean operations, use smooth transitions
+
         death_prob = torch.sigmoid((self.death_threshold - self.energies) * 10.0)  # Steep sigmoid
         alive_float = self.alive.float() * (1.0 - death_prob)
         
@@ -188,7 +181,6 @@ class DifferentiableBoidsEnv:
         # Energy reward
         energy_reward = torch.clamp(self.energies / self.initial_energy, 0, 1) * 0.1
         
-        # Cooperation reward - distance to nearest neighbor
         pos_expanded = self.positions.unsqueeze(2)  # [batch, agents, 1, 2]
         pos_expanded_t = self.positions.unsqueeze(1)  # [batch, 1, agents, 2]
         distances = torch.norm(pos_expanded - pos_expanded_t, dim=-1)  # [batch, agents, agents]
@@ -198,7 +190,7 @@ class DifferentiableBoidsEnv:
         distances = distances.masked_fill(eye_mask, 1000.0)
         
         alive_mask = alive_float.unsqueeze(1) * alive_float.unsqueeze(2)
-        distances = distances + (1.0 - alive_mask) * 1000.0  # Add large distance for dead agents
+        distances = distances + (1.0 - alive_mask) * 1000.0  
         
         min_distances, _ = torch.min(distances, dim=-1)
         cooperation_reward = torch.exp(-min_distances / 20.0) * 0.05
@@ -221,7 +213,6 @@ class DifferentiableBoidsEnv:
         
         batch_size, num_agents = pos_norm.shape[:2]
         
-        # Get neighbor information
         pos_expanded = self.positions.unsqueeze(2)
         pos_expanded_t = self.positions.unsqueeze(1)
         all_distances = torch.norm(pos_expanded - pos_expanded_t, dim=-1)
@@ -237,14 +228,12 @@ class DifferentiableBoidsEnv:
         
         neighbor_info = torch.zeros(batch_size, num_agents, 4, device=self.device)
         
-        # FIXED: More efficient neighbor info computation
         for b in range(batch_size):
             valid_mask = valid_neighbors[b] & self.alive[b]
             if valid_mask.any():
                 valid_agents = torch.where(valid_mask)[0]
                 closest_idx = closest_indices[b][valid_mask]
                 
-                # Relative position and velocity
                 neighbor_info[b, valid_agents, :2] = (
                     self.positions[b, closest_idx] - self.positions[b, valid_agents]
                 ) / self.world_size
@@ -270,7 +259,6 @@ class DifferentiableBoidsEnv:
         grid_x = torch.clamp(grid_x, 0, grid_size - 1)
         grid_y = torch.clamp(grid_y, 0, grid_size - 1)
         
-        # Count unique cells
         unique_cells = torch.unique(grid_x * grid_size + grid_y)
         
         return len(unique_cells), len(unique_cells) / (grid_size * grid_size)
@@ -393,7 +381,6 @@ class ExperimentRunner:
             device=self.device
         )
         
-        # Separate optimizers for better control
         self.policy_optimizer = torch.optim.Adam(self.agent.policy_net.parameters(), lr=self.learning_rate)
         self.param_optimizer = torch.optim.Adam([self.agent.alpha, self.agent.beta], lr=self.learning_rate * 0.1)
         
@@ -438,7 +425,6 @@ class ExperimentRunner:
         
         loss.backward()
 
-        # Gradient clipping
         policy_grad_norm = torch.nn.utils.clip_grad_norm_(self.agent.policy_net.parameters(), 1.0)
         
         if method in ["Learnable AUG"]:
@@ -563,7 +549,6 @@ def run_experiment():
     print("Testing gradient flow...")
     runner = ExperimentRunner(device=device)
     
-    # Check if gradients are flowing
     state = runner.env.reset()
     action_probs = runner.agent.sample_action(state, "Fixed AUG")
     next_state, rewards, info = runner.env.step(action_probs)
