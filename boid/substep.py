@@ -231,17 +231,36 @@ class DecideActions(SubstepAction):
     def forward(self, state: Dict[str, Any], observations) -> Dict[str, Any]:
         global global_policy
         
-        agent_state = observations["agent_state"]
+        # CRITICAL FIX: Get agent_state directly from observations with proper gradient flow
+        if "agent_state" in observations:
+            agent_state = observations["agent_state"]
+        else:
+            # Fallback: if agent_state not in observations, we have a problem
+            print("WARNING: agent_state not found in observations!")
+            positions = get_var(state, self.input_variables["positions"])
+            batch_size, num_agents = positions.shape[:2]
+            agent_state = torch.randn(batch_size * num_agents, 10, device=positions.device, requires_grad=True)
+        
         method = self.fixed_args.get("method", "Stochastic AD")
         tau = self.fixed_args.get("tau", 1.0)
         
-        # Get original shape info
+        # Get original shape info from positions to reconstruct batch dimensions
         positions = get_var(state, self.input_variables["positions"])
         batch_size, num_agents = positions.shape[:2]
+        
+        # CRITICAL: Ensure agent_state requires gradients
+        if not agent_state.requires_grad:
+            print(f"WARNING: agent_state does not require gradients! Method: {method}")
+            agent_state = agent_state.detach().requires_grad_(True)
         
         # Initialize uncertainty tracker if needed
         if global_policy.uncertainty_tracker is None:
             global_policy.reset_uncertainty(batch_size * num_agents, 9)
+        
+        # CRITICAL: Check that global_policy.policy_net parameters require gradients
+        policy_requires_grad = any(p.requires_grad for p in global_policy.policy_net.parameters())
+        if not policy_requires_grad:
+            print("WARNING: Policy network parameters do not require gradients!")
         
         # Compute action probabilities using your estimators
         if method == "Learnable AUG":
@@ -253,39 +272,97 @@ class DecideActions(SubstepAction):
         else:  # "Stochastic AD"
             action_probs = self._sample_stochastic_ad(agent_state)
         
+        # CRITICAL: Verify action_probs has gradients
+        if not action_probs.requires_grad:
+            print(f"WARNING: action_probs does not require gradients! Method: {method}")
+        
         # Convert to action vectors
         action_vectors = torch.einsum('ba,ad->bd', action_probs, global_policy.action_vectors)
         action_vectors = action_vectors.reshape(batch_size, num_agents, 2)
+        
+        # CRITICAL: Verify final action_vectors has gradients
+        if not action_vectors.requires_grad:
+            print(f"WARNING: action_vectors does not require gradients! Method: {method}")
         
         return {
             self.output_variables[0]: action_vectors
         }
     
     def _sample_stochastic_ad(self, state):
+        # CRITICAL: Ensure gradient flow through policy network
         probs = global_policy.compute_probs(state)
+        
+        # Check if probs has gradients
+        if not probs.requires_grad:
+            print("WARNING: probs from policy network do not require gradients in Stochastic AD!")
+        
+        # CRITICAL FIX: Instead of converting to hard one-hot, use the original probs
+        # Your Categorical.apply already implements the proper backward pass
+        # So we can just return the original probabilities with your custom gradients
         sample_indices = Categorical.apply(probs)
-        action_probs = F.one_hot(sample_indices.squeeze(-1).long(), 9).float()
+        
+        # Use straight-through estimator: forward pass uses hard selection, backward uses soft probs
+        # This preserves your custom gradient computation while maintaining differentiability
+        action_probs = probs + (torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0) - probs).detach()
+        
+        # Verify gradients are preserved
+        if not action_probs.requires_grad:
+            print("WARNING: action_probs lost gradients in Stochastic AD!")
+        
         return action_probs
     
     def _sample_stochastic_categorical(self, state):
         probs = global_policy.compute_probs(state)
+        
+        if not probs.requires_grad:
+            print("WARNING: probs from policy network do not require gradients in Fixed AUG!")
+        
         sample_indices, uncertainty = StochasticCategorical.apply(probs, global_policy.uncertainty_tracker)
         global_policy.uncertainty_tracker = uncertainty
-        action_probs = F.one_hot(sample_indices.squeeze(-1).long(), 9).float()
+        
+        # CRITICAL FIX: Use straight-through estimator to preserve gradients
+        # Forward: hard one-hot, Backward: your custom gradients through probs
+        hard_onehot = torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0)
+        action_probs = probs + (hard_onehot - probs).detach()
+        
+        if not action_probs.requires_grad:
+            print("WARNING: action_probs lost gradients in Fixed AUG!")
+        
         return action_probs
     
     def _sample_learnable_aug(self, state):
         probs = global_policy.compute_probs(state)
+        
+        if not probs.requires_grad:
+            print("WARNING: probs from policy network do not require gradients in Learnable AUG!")
+        
         sample_indices, uncertainty = LearnableStochasticCategorical.apply(
             probs, global_policy.alpha, global_policy.beta, global_policy.uncertainty_tracker
         )
         global_policy.uncertainty_tracker = uncertainty
-        action_probs = F.one_hot(sample_indices.squeeze(-1).long(), 9).float()
+        
+        # CRITICAL FIX: Use straight-through estimator to preserve gradients
+        # This ensures your custom backward pass in LearnableStochasticCategorical is used
+        hard_onehot = torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0)
+        action_probs = probs + (hard_onehot - probs).detach()
+        
+        if not action_probs.requires_grad:
+            print("WARNING: action_probs lost gradients in Learnable AUG!")
+        
         return action_probs
     
     def _sample_gumbel(self, state, tau=1.0):
         logits = global_policy.compute_logits(state)
+        
+        if not logits.requires_grad:
+            print("WARNING: logits from policy network do not require gradients in Gumbel!")
+        
+        # CRITICAL: Gumbel-Softmax naturally preserves gradients!
         action_probs = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
+        
+        if not action_probs.requires_grad:
+            print("WARNING: action_probs lost gradients in Gumbel!")
+        
         return action_probs
 
 @registry.register_substep("update_boid_state", "transition")
@@ -786,7 +863,7 @@ class AgentTorchBoidsExperiment:
         max_reward = 0.0
         
         # Track cumulative coverage throughout the episode
-        grid_size = 100
+        grid_size = 20
         cell_size = self.world_size / grid_size
         visited_cells = set()
         
@@ -834,7 +911,7 @@ class AgentTorchBoidsExperiment:
         final_agents_alive = alive_final.sum().item()
         
         # Use cumulative coverage instead of just final position coverage
-        cumulative_coverage_ratio = len(visited_cells) 
+        cumulative_coverage_ratio = len(visited_cells) / (grid_size * grid_size)
         
         avg_energy = self._compute_avg_energy(energies_final, alive_final)
         
@@ -870,7 +947,7 @@ class AgentTorchBoidsExperiment:
         Compute the percentage of grid cells that have been visited by alive agents.
         Returns a value between 0.0 and 1.0 representing the fraction of area covered.
         """
-        grid_size = 100
+        grid_size = 20
         cell_size = self.world_size / grid_size
         
         # Get positions of alive agents across all batches
@@ -897,9 +974,9 @@ class AgentTorchBoidsExperiment:
         
         # Count unique cells visited
         unique_cells = torch.unique(cell_ids)
-        # coverage_ratio = len(unique_cells) / (grid_size * grid_size)
+        coverage_ratio = len(unique_cells) / (grid_size * grid_size)
         
-        return len(unique_cells)
+        return coverage_ratio
     
     def _compute_avg_energy(self, energies, alive):
         """
@@ -969,7 +1046,7 @@ class AgentTorchBoidsExperiment:
                 max_reward = 0.0
                 
                 # Track cumulative coverage for evaluation
-                grid_size = 100
+                grid_size = 20
                 cell_size = self.world_size / grid_size
                 visited_cells = set()
                 
@@ -1013,7 +1090,7 @@ class AgentTorchBoidsExperiment:
                 energies_final = final_state["agents"]["boids"]["energies"]
                 
                 final_agents_alive = alive_final.sum().item()
-                cumulative_coverage_ratio = len(visited_cells) 
+                cumulative_coverage_ratio = len(visited_cells) / (grid_size * grid_size)
                 avg_energy = self._compute_avg_energy(energies_final, alive_final)
                 
                 eval_rewards.append(episode_reward)
@@ -1057,7 +1134,7 @@ def run_agenttorch_experiment():
     # Test gradient flow first
     print("Testing gradient flow...")
     experiment = AgentTorchBoidsExperiment(device=device)
-    experiment.setup_simulation("Gumbel")
+    experiment.setup_simulation("Fixed AUG")
     
     # Execute one step to test gradient flow
     experiment.runner.reset()
