@@ -6,7 +6,6 @@ import time
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
 
-# Import AgentTorch components following the tutorial
 from agent_torch.config import (
     ConfigBuilder,
     StateBuilder,
@@ -21,8 +20,17 @@ from agent_torch.core import Registry
 from agent_torch.core.helpers import get_var
 from agent_torch.core.substep import SubstepObservation, SubstepAction, SubstepTransition
 from agent_torch.core.environment import envs
+import random
 
-# Preserve your exact gradient estimators
+seed_value = 54
+random.seed(seed_value)
+np.random.seed(seed_value)
+torch.manual_seed(seed_value)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed_value)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 class Categorical(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p):
@@ -104,7 +112,7 @@ class LearnableStochasticCategorical(torch.autograd.Function):
         
         scaling = torch.sigmoid(alpha) * (1 + torch.tanh(beta))
         adjusted_ws = (one_hot * w_chosen + (1 - one_hot) * w_non_chosen) * confidence * scaling
-        adjusted_ws = adjusted_ws / adjusted_ws.mean(dim=-1, keepdim=True).clamp(min=1e-6)
+        # adjusted_ws = adjusted_ws / adjusted_ws.mean(dim=-1, keepdim=True).clamp(min=1e-6)
         
         grad_p = grad_output.expand_as(p) * adjusted_ws
         
@@ -118,7 +126,6 @@ class LearnableStochasticCategorical(torch.autograd.Function):
         
         return grad_p, grad_alpha, grad_beta, None
 
-# Policy Network (same as your original)
 class PolicyNet(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=128):
         super().__init__()
@@ -135,13 +142,12 @@ class PolicyNet(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-# Global state for neural network and parameters
 class GlobalPolicyState:
     def __init__(self, state_dim, action_dim, hidden_dim=128, device='cuda'):
         self.device = device
         self.policy_net = PolicyNet(state_dim, action_dim, hidden_dim).to(device)
-        self.alpha = nn.Parameter(torch.tensor(1.0, device=device))
-        self.beta = nn.Parameter(torch.tensor(1.0, device=device))
+        self.alpha = nn.Parameter(torch.tensor(2.0, device=device))
+        self.beta = nn.Parameter(torch.tensor(1.5, device=device))
         self.uncertainty_tracker = None
         self.action_vectors = torch.tensor([
             [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1],
@@ -184,7 +190,6 @@ class ObserveNeighbors(SubstepAction):
         
         batch_size, num_agents = positions.shape[:2]
         
-        # Normalize state components
         pos_norm = positions / world_size
         vel_norm = velocities / max_speed
         energy_norm = energies.unsqueeze(-1) / initial_energy
@@ -202,7 +207,7 @@ class ObserveNeighbors(SubstepAction):
         all_distances = all_distances.masked_fill(~alive_mask, 1e6)
         
         min_distances, closest_indices = torch.min(all_distances, dim=-1)
-        valid_neighbors = min_distances < 1e5
+        valid_neighbors = min_distances < 1e4
         
         neighbor_info = torch.zeros(batch_size, num_agents, 4, device=positions.device)
         
@@ -231,38 +236,32 @@ class DecideActions(SubstepAction):
     def forward(self, state: Dict[str, Any], observations) -> Dict[str, Any]:
         global global_policy
         
-        # CRITICAL FIX: Get agent_state directly from observations with proper gradient flow
+       
         if "agent_state" in observations:
             agent_state = observations["agent_state"]
         else:
-            # Fallback: if agent_state not in observations, we have a problem
-            print("WARNING: agent_state not found in observations!")
+            # print("agent_state not found in observations!")
             positions = get_var(state, self.input_variables["positions"])
             batch_size, num_agents = positions.shape[:2]
             agent_state = torch.randn(batch_size * num_agents, 10, device=positions.device, requires_grad=True)
         
         method = self.fixed_args.get("method", "Stochastic AD")
-        tau = self.fixed_args.get("tau", 1.0)
+        tau = self.fixed_args.get("tau", 2)
         
         # Get original shape info from positions to reconstruct batch dimensions
         positions = get_var(state, self.input_variables["positions"])
         batch_size, num_agents = positions.shape[:2]
-        
-        # CRITICAL: Ensure agent_state requires gradients
+
         if not agent_state.requires_grad:
-            print(f"WARNING: agent_state does not require gradients! Method: {method}")
+            # print(f"agent_state does not require gradients method: {method}")
             agent_state = agent_state.detach().requires_grad_(True)
         
-        # Initialize uncertainty tracker if needed
+    
         if global_policy.uncertainty_tracker is None:
             global_policy.reset_uncertainty(batch_size * num_agents, 9)
         
-        # CRITICAL: Check that global_policy.policy_net parameters require gradients
-        policy_requires_grad = any(p.requires_grad for p in global_policy.policy_net.parameters())
-        if not policy_requires_grad:
-            print("WARNING: Policy network parameters do not require gradients!")
+
         
-        # Compute action probabilities using your estimators
         if method == "Learnable AUG":
             action_probs = self._sample_learnable_aug(agent_state)
         elif method == "Gumbel":
@@ -272,96 +271,84 @@ class DecideActions(SubstepAction):
         else:  # "Stochastic AD"
             action_probs = self._sample_stochastic_ad(agent_state)
         
-        # CRITICAL: Verify action_probs has gradients
-        if not action_probs.requires_grad:
-            print(f"WARNING: action_probs does not require gradients! Method: {method}")
+ 
+        # if not action_probs.requires_grad:
+        #     print(f"action_probs does not require gradients method: {method}")
         
         # Convert to action vectors
         action_vectors = torch.einsum('ba,ad->bd', action_probs, global_policy.action_vectors)
         action_vectors = action_vectors.reshape(batch_size, num_agents, 2)
-        
-        # CRITICAL: Verify final action_vectors has gradients
-        if not action_vectors.requires_grad:
-            print(f"WARNING: action_vectors does not require gradients! Method: {method}")
+        # if not action_vectors.requires_grad:
+        #     print(f"action_vectors does not require gradients method: {method}")
         
         return {
             self.output_variables[0]: action_vectors
         }
     
     def _sample_stochastic_ad(self, state):
-        # CRITICAL: Ensure gradient flow through policy network
         probs = global_policy.compute_probs(state)
-        
-        # Check if probs has gradients
-        if not probs.requires_grad:
-            print("WARNING: probs from policy network do not require gradients in Stochastic AD!")
-        
-        # CRITICAL FIX: Instead of converting to hard one-hot, use the original probs
-        # Your Categorical.apply already implements the proper backward pass
-        # So we can just return the original probabilities with your custom gradients
         sample_indices = Categorical.apply(probs)
-        
-        # Use straight-through estimator: forward pass uses hard selection, backward uses soft probs
-        # This preserves your custom gradient computation while maintaining differentiability
         action_probs = probs + (torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0) - probs).detach()
-        
-        # Verify gradients are preserved
-        if not action_probs.requires_grad:
-            print("WARNING: action_probs lost gradients in Stochastic AD!")
-        
         return action_probs
     
     def _sample_stochastic_categorical(self, state):
         probs = global_policy.compute_probs(state)
         
-        if not probs.requires_grad:
-            print("WARNING: probs from policy network do not require gradients in Fixed AUG!")
+        # if not probs.requires_grad:
+        #     print("probs from policy network do not require gradients in Fixed AUG")
+        
+        
+        if global_policy.uncertainty_tracker is None or global_policy.uncertainty_tracker.shape[0] != state.shape[0]:
+            print(f"Resetting uncertainty tracker for Fixed AUG: state shape {state.shape}")
+            global_policy.uncertainty_tracker = torch.zeros(state.shape[0], probs.shape[1], 
+                                                           device=state.device, dtype=probs.dtype)
         
         sample_indices, uncertainty = StochasticCategorical.apply(probs, global_policy.uncertainty_tracker)
+        
+        # if torch.allclose(uncertainty, global_policy.uncertainty_tracker):
+        #     print("Uncertainty tracker not being updated in Fixed AUG!")
+        
         global_policy.uncertainty_tracker = uncertainty
         
-        # CRITICAL FIX: Use straight-through estimator to preserve gradients
-        # Forward: hard one-hot, Backward: your custom gradients through probs
         hard_onehot = torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0)
         action_probs = probs + (hard_onehot - probs).detach()
         
-        if not action_probs.requires_grad:
-            print("WARNING: action_probs lost gradients in Fixed AUG!")
+        # if not action_probs.requires_grad:
+        #     print("action_probs lost gradients in Fixed AUG!")
         
         return action_probs
     
     def _sample_learnable_aug(self, state):
         probs = global_policy.compute_probs(state)
         
-        if not probs.requires_grad:
-            print("WARNING: probs from policy network do not require gradients in Learnable AUG!")
+        # if not probs.requires_grad:
+        #     print("probs from policy network do not require gradients in Learnable AUG!")
+        
+        if global_policy.uncertainty_tracker is None or global_policy.uncertainty_tracker.shape[0] != state.shape[0]:
+            print(f"Resetting uncertainty tracker for Learnable AUG: state shape {state.shape}")
+            global_policy.uncertainty_tracker = torch.zeros(state.shape[0], probs.shape[1], 
+                                                           device=state.device, dtype=probs.dtype)
+        
         
         sample_indices, uncertainty = LearnableStochasticCategorical.apply(
             probs, global_policy.alpha, global_policy.beta, global_policy.uncertainty_tracker
         )
+        
         global_policy.uncertainty_tracker = uncertainty
         
-        # CRITICAL FIX: Use straight-through estimator to preserve gradients
-        # This ensures your custom backward pass in LearnableStochasticCategorical is used
         hard_onehot = torch.zeros_like(probs).scatter_(1, sample_indices.long(), 1.0)
         action_probs = probs + (hard_onehot - probs).detach()
-        
-        if not action_probs.requires_grad:
-            print("WARNING: action_probs lost gradients in Learnable AUG!")
+
         
         return action_probs
     
-    def _sample_gumbel(self, state, tau=1.0):
+    def _sample_gumbel(self, state, tau=2.0):
         logits = global_policy.compute_logits(state)
         
-        if not logits.requires_grad:
-            print("WARNING: logits from policy network do not require gradients in Gumbel!")
+        action_probs = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
         
-        # CRITICAL: Gumbel-Softmax naturally preserves gradients!
-        action_probs = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
-        
-        if not action_probs.requires_grad:
-            print("WARNING: action_probs lost gradients in Gumbel!")
+        # if not action_probs.requires_grad:
+        #     print("action_probs lost gradients in Gumbel")
         
         return action_probs
 
@@ -373,7 +360,6 @@ class UpdateBoidState(SubstepTransition):
         energies = get_var(state, self.input_variables["energies"])
         alive = get_var(state, self.input_variables["alive"])
         
-        # Get parameters from fixed and learnable arguments
         world_size = self.fixed_args["world_size"]
         max_speed = self.fixed_args["max_speed"]
         initial_energy = self.fixed_args["initial_energy"]
@@ -382,14 +368,12 @@ class UpdateBoidState(SubstepTransition):
         
         action_vectors = action["action_vectors"]
         
-        # Apply alive mask to actions
         alive_mask = alive.unsqueeze(-1).float()
         masked_actions = action_vectors * alive_mask
         
-        # Update velocities
         new_velocities = 0.8 * velocities + 0.2 * masked_actions * max_speed
         
-        # Clamp velocity magnitude
+
         vel_magnitude = torch.norm(new_velocities, dim=-1, keepdim=True)
         vel_magnitude_clamped = torch.clamp(vel_magnitude, max=max_speed)
         new_velocities = new_velocities * (vel_magnitude_clamped / (vel_magnitude + 1e-8))
@@ -419,8 +403,8 @@ class UpdateBoidState(SubstepTransition):
         }
     
     def _compute_rewards(self, positions, energies, alive_float, world_size, initial_energy):
-        # Energy reward
-        energy_reward = torch.clamp(energies / initial_energy, 0, 1) * 0.1
+
+        energy_reward = torch.clamp(energies / initial_energy, 0, 1) 
         
         # Distance-based cooperation reward
         pos_expanded = positions.unsqueeze(2)
@@ -436,43 +420,41 @@ class UpdateBoidState(SubstepTransition):
         distances = distances + (1.0 - alive_mask) * 1000.0
         
         min_distances, _ = torch.min(distances, dim=-1)
-        cooperation_reward = torch.exp(-min_distances / 20.0) * 0.05
-        
-        # Social reward
-        nearby_mask = (distances < 50.0).float() * alive_mask
+        cooperation_reward = torch.exp(-min_distances / 20.0) * 10
+
+        # print("Mean distance:", distances.mean().item())
+        nearby_mask = (distances < 600.0).float() * alive_mask
         neighbor_count = nearby_mask.sum(dim=-1)
-        social_reward = torch.tanh(neighbor_count * 0.1) * 0.02
-        
+        social_reward = torch.tanh(neighbor_count * 0.1) * 0.2
+        # print(dis)
+        # print(f"Energy reward: { energy_reward} , Cooperation_reward: {cooperation_reward} , Social reward: {social_reward}, alive: {alive_float}")
         total_reward = energy_reward + cooperation_reward + social_reward
         return total_reward * alive_float
 
-# Configuration Builder following AgentTorch tutorial
+
 def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=100, 
                        batch_size=10, world_size=100.0, device='cuda', method="Stochastic AD"):
     
-    # Initialize global policy
+ 
     init_global_policy(state_dim=10, action_dim=9, device=device)
     
     config = ConfigBuilder()
     
-    # 1. Simulation Metadata (REQUIRED PARAMETERS)
+
     metadata = {
         "num_agents": num_agents,
         "num_episodes": num_episodes,
         "num_steps_per_episode": num_steps_per_episode,
         "num_substeps_per_step": 1,
         "device": device,
-        "calibration": True  # Enable calibration for learnable parameters
+        "calibration": True  
     }
     config.set_metadata(metadata)
-    
-    # 2. State Configuration
+
     state_builder = StateBuilder()
     
-    # Add boids agents
     agent_builder = AgentBuilder("boids", num_agents)
     
-    # Agent properties
     positions = PropertyBuilder("positions")\
         .set_dtype("float")\
         .set_shape([batch_size, num_agents, 2])\
@@ -500,7 +482,6 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     
     state_builder.add_agent("boids", agent_builder)
     
-    # Add environment variables
     env_builder = EnvironmentBuilder()
     
     world_size_env = PropertyBuilder("world_size")\
@@ -525,15 +506,12 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     state_builder.set_environment(env_builder)
     config.set_state(state_builder.to_dict())
     
-    # 3. Substep Configuration
     boids_substep = SubstepBuilder("BoidsStep", "Boids simulation with gradient estimators")
     boids_substep.add_active_agent("boids")
     boids_substep.config["observation"] = {"boids": None}  # Following tutorial pattern
     
-    # Add observation/policy for neighbor detection
     observe_policy = PolicyBuilder()
     
-    # Learnable parameters for observation
     world_size_param = PropertyBuilder.create_argument(
         name="World size parameter",
         value=world_size,
@@ -542,7 +520,7 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     
     max_speed_param = PropertyBuilder.create_argument(
         name="Max speed parameter",
-        value=5.0,
+        value=10.0,
         learnable=False
     ).config
     
@@ -569,7 +547,6 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
         }
     )
     
-    # Add action decision policy
     method_param = PropertyBuilder.create_argument(
         name="Gradient estimation method",
         value=method,
@@ -578,7 +555,7 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     
     tau_param = PropertyBuilder.create_argument(
         name="Gumbel temperature",
-        value=1.0,
+        value=2,
         learnable=False
     ).config
     
@@ -592,10 +569,8 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     
     boids_substep.set_policy("boids", observe_policy)
     
-    # Add transition
     transition = TransitionBuilder()
     
-    # Learnable environment parameters for transition
     energy_decay_param = PropertyBuilder.create_argument(
         name="Energy decay rate",
         value=0.5,
@@ -632,7 +607,6 @@ def create_boids_config(num_agents=10, num_episodes=51, num_steps_per_episode=10
     
     return config
 
-# Simple population class following tutorial patterns
 class BoidsPopulation:
     def __init__(self, num_agents=10, batch_size=10, world_size=100.0, device='cuda'):
         self.num_agents = num_agents
@@ -640,15 +614,14 @@ class BoidsPopulation:
         self.world_size = world_size
         self.device = device
 
-# Experiment Runner following AgentTorch patterns
 class AgentTorchBoidsExperiment:
     def __init__(self, device='cuda'):
         self.device = device
-        self.num_agents = 10
-        self.world_size = 100.0
-        self.batch_size = 10
-        self.learning_rate = 3e-4
-        self.num_episodes = 51
+        self.num_agents = 100
+        self.world_size = 1000.0
+        self.batch_size = 1
+        self.learning_rate = 1e-3
+        self.num_episodes = 121
         self.episode_length = 100
         
         self.training_rewards = []
@@ -658,11 +631,9 @@ class AgentTorchBoidsExperiment:
         self.avg_energies = []
         self.gradient_norms = []
         
-        # Following tutorial pattern - create module-level registry
         self.registry = registry
         
     def setup_simulation(self, method="Stochastic AD"):
-        # Create config following tutorial
         config = create_boids_config(
             num_agents=self.num_agents,
             num_episodes=self.num_episodes,
@@ -673,7 +644,6 @@ class AgentTorchBoidsExperiment:
             method=method
         )
         
-        # Create population
         population = BoidsPopulation(
             num_agents=self.num_agents,
             batch_size=self.batch_size,
@@ -682,7 +652,6 @@ class AgentTorchBoidsExperiment:
         )
         
         # AgentTorch expects a module-like object with __path__ attribute for models
-        # Let's skip envs.create and go directly to manual runner since it's more reliable
         print("Using manual runner for better control and reliability")
         self.runner = self._create_manual_runner(config, population, method)
         
@@ -704,7 +673,6 @@ class AgentTorchBoidsExperiment:
                 self.step_count = 0
                 
             def reset(self):
-                # Initialize state from config
                 config_state = self.config_dict["state"]
                 self.state = {
                     "agents": {
@@ -727,7 +695,6 @@ class AgentTorchBoidsExperiment:
                 global global_policy
                 
                 for _ in range(num_steps):
-                    # Execute substeps following the configuration
                     
                     # 1. Observation phase - ObserveNeighbors
                     observe_input_vars = {
@@ -769,7 +736,7 @@ class AgentTorchBoidsExperiment:
                         "learnable": {},  # No learnable parameters for policy decision
                         "fixed": {
                             "method": self.method, 
-                            "tau": 1.0
+                            "tau": 2
                         }
                     }
                     
@@ -817,7 +784,6 @@ class AgentTorchBoidsExperiment:
                     self.state["agents"]["boids"]["energies"] = new_state["energies"]
                     self.state["agents"]["boids"]["alive"] = new_state["alive"]
                     self.state["agents"]["boids"]["rewards"] = new_state["rewards"]
-                    
                     self.step_count += 1
                     
                     actions = policy_substep.forward(obs_state, observations)
@@ -826,7 +792,7 @@ class AgentTorchBoidsExperiment:
                     # transition_substep = UpdateBoidState()
                     # transition_substep.input_variables = {
                     #     "positions": "positions",
-                    #     "velocities": "velocities",
+                    #     "velocities": "velocities",``
                     #     "energies": "energies",
                     #     "alive": "alive"
                     # }
@@ -856,22 +822,18 @@ class AgentTorchBoidsExperiment:
         global global_policy
         global_policy.reset_uncertainty(self.batch_size * self.num_agents, 9)
         
-        # Reset simulation
         self.runner.reset()
         
         total_reward = 0.0
         max_reward = 0.0
         
-        # Track cumulative coverage throughout the episode
-        grid_size = 20
+        grid_size = 100
         cell_size = self.world_size / grid_size
         visited_cells = set()
         
         for step in range(self.episode_length):
-            # Execute one simulation step
             self.runner.step(1)
             
-            # Get rewards from state
             state = self.runner.state
             if "rewards" in state.get("agents", {}).get("boids", {}):
                 rewards = state["agents"]["boids"]["rewards"]
@@ -921,15 +883,19 @@ class AgentTorchBoidsExperiment:
         self.policy_optimizer.zero_grad()
         if method == "Learnable AUG":
             self.param_optimizer.zero_grad()
-        
+  
         loss.backward()
         
-        # Gradient clipping
+        
         policy_grad_norm = torch.nn.utils.clip_grad_norm_(global_policy.policy_net.parameters(), 1.0)
         
         if method == "Learnable AUG":
-            param_grad_norm = torch.nn.utils.clip_grad_norm_([global_policy.alpha, global_policy.beta], 1.0)
-            total_grad_norm = policy_grad_norm + param_grad_norm
+            if global_policy.alpha.grad is not None and global_policy.beta.grad is not None:
+                param_grad_norm = torch.nn.utils.clip_grad_norm_([global_policy.alpha, global_policy.beta], 1.0)
+                total_grad_norm = policy_grad_norm + param_grad_norm
+            else:
+                # print("No gradients for alpha/beta")
+                total_grad_norm = policy_grad_norm
         else:
             total_grad_norm = policy_grad_norm
         
@@ -938,7 +904,12 @@ class AgentTorchBoidsExperiment:
         # Optimizer steps
         self.policy_optimizer.step()
         if method == "Learnable AUG":
-            self.param_optimizer.step()
+            # Only step if gradients exist
+            if global_policy.alpha.grad is not None and global_policy.beta.grad is not None:
+                self.param_optimizer.step()
+                print(f"After step - Alpha: {global_policy.alpha.item():.4f}, Beta: {global_policy.beta.item():.4f}")
+            # else:
+            #     print("Skipping parameter optimizer step due to missing gradients")
         
         return total_reward.item(), loss.item(), max_reward, final_agents_alive, cumulative_coverage_ratio, avg_energy
     
@@ -947,32 +918,25 @@ class AgentTorchBoidsExperiment:
         Compute the percentage of grid cells that have been visited by alive agents.
         Returns a value between 0.0 and 1.0 representing the fraction of area covered.
         """
-        grid_size = 20
+        grid_size = 100
         cell_size = self.world_size / grid_size
         
-        # Get positions of alive agents across all batches
-        # positions shape: [batch_size, num_agents, 2]
-        # alive shape: [batch_size, num_agents]
+
         
-        # Flatten batch and agent dimensions for alive agents only
         alive_expanded = alive.unsqueeze(-1).expand_as(positions)  # [batch_size, num_agents, 2]
         alive_positions = positions[alive_expanded].view(-1, 2)  # [num_alive_agents_total, 2]
         
         if alive_positions.shape[0] == 0:
             return 0.0
         
-        # Convert positions to grid coordinates
         grid_x = torch.floor(alive_positions[:, 0] / cell_size).long()
         grid_y = torch.floor(alive_positions[:, 1] / cell_size).long()
         
-        # Clamp to valid grid range
         grid_x = torch.clamp(grid_x, 0, grid_size - 1)
         grid_y = torch.clamp(grid_y, 0, grid_size - 1)
         
-        # Convert 2D coordinates to unique cell IDs
         cell_ids = grid_x * grid_size + grid_y
         
-        # Count unique cells visited
         unique_cells = torch.unique(cell_ids)
         coverage_ratio = len(unique_cells) / (grid_size * grid_size)
         
@@ -982,8 +946,7 @@ class AgentTorchBoidsExperiment:
         """
         Compute average energy of alive agents across all batches.
         """
-        # energies shape: [batch_size, num_agents]
-        # alive shape: [batch_size, num_agents]
+
         
         alive_energies = energies[alive]  # Get energies of alive agents only
         if alive_energies.numel() > 0:
@@ -997,8 +960,17 @@ class AgentTorchBoidsExperiment:
         # Setup simulation
         self.setup_simulation(method)
         
+        global global_policy
+        if method == "Learnable AUG":
+            self.param_optimizer = torch.optim.Adam([global_policy.alpha, global_policy.beta], lr=self.learning_rate * 0.5)  # Increased from 0.1
+            print(f"Using higher learning rate for AUG parameters: {self.learning_rate * 0.5}")
+        
         for episode in range(self.num_episodes):
             total_reward, loss, max_reward, final_agents_alive, coverage_ratio, avg_energy = self.train_episode(method)
+            
+            # Calculate exact number of cells covered
+            grid_size = 100
+            cells_covered = int(coverage_ratio * grid_size * grid_size)
             
             self.training_rewards.append(total_reward)
             self.max_rewards.append(max_reward)
@@ -1017,13 +989,46 @@ class AgentTorchBoidsExperiment:
                 avg_agents_alive = np.mean(recent_agents_alive)
                 avg_coverage = np.mean(recent_coverage)
                 avg_avg_energy = np.mean(recent_energy)
+                avg_cells_covered = int(avg_coverage * grid_size * grid_size)
                 
                 print(f"Episode {episode}: Max Reward: {avg_max_reward:.2f}, "
                       f"Agents Alive: {avg_agents_alive:.1f}, "
-                      f"Coverage: {avg_coverage:.3f}, "
+                      f"Coverage: {avg_coverage:.3f} ({avg_cells_covered}/{grid_size*grid_size} cells), "
                       f"Avg Energy: {avg_avg_energy:.1f}")
+                
         
         print("Training completed!")
+        
+        # FINAL TRAINING STATISTICS
+        # print(f"\n{'='*60}")
+        print(f"FINAL TRAINING STATISTICS - {method}")
+        # print(f"{'='*60}")
+        
+        # final_recent_indices = max(0, len(self.max_rewards))  # Last 10 episodes
+        final_recent_indices = 0
+        final_max_rewards = self.max_rewards[final_recent_indices:]
+        final_agents_alive = self.final_agents_alive[final_recent_indices:]
+        final_coverage = self.coverage_ratios[final_recent_indices:]
+        final_energy = self.avg_energies[final_recent_indices:]
+        
+        final_avg_max_reward = np.mean(final_max_rewards)
+        final_std_max_reward = np.std(final_max_rewards)
+        final_avg_agents_alive = np.mean(final_agents_alive)
+        final_std_agents_alive = np.std(final_agents_alive)
+        final_avg_coverage = np.mean(final_coverage)
+        final_std_coverage = np.std(final_coverage)
+        final_avg_energy = np.mean(final_energy)
+        final_std_energy = np.std(final_energy)
+        final_avg_cells = int(final_avg_coverage * grid_size * grid_size)
+        
+        print(f"Max Reward: {final_avg_max_reward + final_std_max_reward:.2f}")
+        print(f"Agents Alive: {final_avg_agents_alive:.1f}")
+        print(f"Coverage: {final_avg_coverage + final_std_coverage:.3f} ({final_avg_cells}/{grid_size*grid_size} cells)")
+        print(f"Avg Energy: {final_avg_energy + final_std_energy:.1f}")
+        print(f"Total Episodes: {len(self.training_rewards)}")
+        
+        if method == "Learnable AUG":
+            print(f"Final Alpha: {global_policy.alpha.item():.4f}, Final Beta: {global_policy.beta.item():.4f}")
     
     def evaluate(self, num_eval_episodes=10, method="Stochastic AD"):
         print(f"Evaluating with method: {method}")
@@ -1033,7 +1038,9 @@ class AgentTorchBoidsExperiment:
         eval_final_agents_alive = []
         eval_coverage_ratios = []
         eval_avg_energies = []
+        eval_cells_covered = []
         
+
         with torch.no_grad():
             for episode in range(num_eval_episodes):
                 global global_policy
@@ -1091,12 +1098,14 @@ class AgentTorchBoidsExperiment:
                 
                 final_agents_alive = alive_final.sum().item()
                 cumulative_coverage_ratio = len(visited_cells) / (grid_size * grid_size)
+                cells_covered = len(visited_cells)
                 avg_energy = self._compute_avg_energy(energies_final, alive_final)
                 
                 eval_rewards.append(episode_reward)
                 eval_max_rewards.append(max_reward)
                 eval_final_agents_alive.append(final_agents_alive)
                 eval_coverage_ratios.append(cumulative_coverage_ratio)
+                eval_cells_covered.append(cells_covered)
                 eval_avg_energies.append(avg_energy)
         
         results = {
@@ -1108,6 +1117,8 @@ class AgentTorchBoidsExperiment:
             'std_final_agents_alive': np.std(eval_final_agents_alive),
             'avg_coverage_ratio': np.mean(eval_coverage_ratios),
             'std_coverage_ratio': np.std(eval_coverage_ratios),
+            'avg_cells_covered': np.mean(eval_cells_covered),
+            'std_cells_covered': np.std(eval_cells_covered),
             'avg_avg_energy': np.mean(eval_avg_energies),
             'std_avg_energy': np.std(eval_avg_energies),
             'all_rewards': eval_rewards,
@@ -1119,14 +1130,15 @@ class AgentTorchBoidsExperiment:
             'gradient_norms': self.gradient_norms
         }
         
-        print(f"Results - Max Reward: {results['avg_max_reward']:.2f}, "
-              f"Agents Alive: {results['avg_final_agents_alive']:.1f}, "
-              f"Coverage: {results['avg_coverage_ratio']:.3f}, "
-              f"Avg Energy: {results['avg_avg_energy']:.1f}")
+        grid_size = 100
+        print(f"Results - Max Reward: {results['avg_max_reward']:.2f} ± {results['std_max_reward']:.2f}, "
+              f"Agents Alive: {results['avg_final_agents_alive']:.1f} ± {results['std_final_agents_alive']:.1f}, "
+              f"Coverage: {results['avg_coverage_ratio']:.3f} ± {results['std_coverage_ratio']:.3f} "
+              f"({results['avg_cells_covered']:.1f} ± {results['std_cells_covered']:.1f}/{grid_size*grid_size} cells), "
+              f"Avg Energy: {results['avg_avg_energy']:.1f} ± {results['std_avg_energy']:.1f}")
         
         return results
 
-# Main experiment function following AgentTorch patterns
 def run_agenttorch_experiment():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
@@ -1136,7 +1148,6 @@ def run_agenttorch_experiment():
     experiment = AgentTorchBoidsExperiment(device=device)
     experiment.setup_simulation("Fixed AUG")
     
-    # Execute one step to test gradient flow
     experiment.runner.reset()
     experiment.runner.step(1)
     
@@ -1160,7 +1171,7 @@ def run_agenttorch_experiment():
         else:
             print("Gradients are not flowing")
     
-    methods = ["Stochastic AD", "Fixed AUG", "Learnable AUG", "Gumbel"]
+    methods = ["Stochastic AD", "Fixed AUG","Learnable AUG","Gumbel"]
     results = {}
     
     for method in methods:
@@ -1174,26 +1185,25 @@ def run_agenttorch_experiment():
         experiment.train(method=method)
         training_time = time.time() - start_time
         
-        eval_results = experiment.evaluate(method=method)
-        eval_results['training_time'] = training_time
+        # eval_results = experiment.evaluate(method=method)
+        # eval_results['training_time'] = training_time
         
-        results[method] = eval_results
+        # results[method] = eval_results
     
-    print(f"\n{'='*60}")
-    print("EXPERIMENT SUMMARY")
-    print(f"{'='*60}")
-    for method, result in results.items():
-        print(f"{method}:")
-        print(f"  Max Reward: {result['avg_max_reward']:.2f}")
-        print(f"  Final Agents Alive: {result['avg_final_agents_alive']:.1f}")
-        print(f"  Coverage Ratio: {result['avg_coverage_ratio']:.3f}")
-        print(f"  Avg Energy: {result['avg_avg_energy']:.1f}")
-        print(f"  Training Time: {result['training_time']:.1f}s")
-        print()
+    # print(f"\n{'='*60}")
+    # print("EXPERIMENT SUMMARY")
+    # print(f"{'='*60}")
+    # for method, result in results.items():
+    #     print(f"{method}:")
+    #     print(f"  Max Reward: {result['avg_max_reward']:.2f}")
+    #     print(f"  Final Agents Alive: {result['avg_final_agents_alive']:.1f}")
+    #     print(f"  Coverage Ratio: {result['avg_coverage_ratio']:.3f}")
+    #     print(f"  Avg Energy: {result['avg_avg_energy']:.1f}")
+    #     print(f"  Training Time: {result['training_time']:.1f}s")
+    #     print()
     
     return results
 
-# Alternative simplified interface that matches your original API
 class AgentTorchBoidsRunner:
     """Simplified interface that closely matches your original ExperimentRunner API"""
     
@@ -1233,7 +1243,6 @@ class AgentTorchBoidsRunner:
     def gradient_norms(self):
         return self.experiment.gradient_norms
 
-# Usage example following AgentTorch tutorial patterns
 def run_boids_simulation():
     """Run boids simulation following AgentTorch tutorial patterns."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -1247,7 +1256,6 @@ def run_boids_simulation():
         print(f"Running Boids simulation with {method}")
         print(f"{'='*50}")
         
-        # Create simulation runner following tutorial pattern
         runner = AgentTorchBoidsRunner(device=device)
         
         # Train the model
@@ -1256,15 +1264,15 @@ def run_boids_simulation():
         training_time = time.time() - start_time
         
         # Evaluate the model
-        eval_results = runner.evaluate(method=method)
-        eval_results['training_time'] = training_time
+        # eval_results = runner.evaluate(method=method)
+        # eval_results['training_time'] = training_time
         
-        results[method] = eval_results
+        # results[method] = eval_results
         
-        # Print episode statistics following tutorial pattern
-        print(f"Method {method} completed:")
-        print(f"  Training time: {training_time:.1f}s")
-        print(f"  Final performance: Max Reward {eval_results['avg_max_reward']:.2f}")
+        # # Print episode statistics following tutorial pattern
+        # print(f"Method {method} completed:")
+        # print(f"  Training time: {training_time:.1f}s")
+        # print(f"  Final performance: Max Reward {eval_results['avg_max_reward']:.2f}")
     
     return results
 
