@@ -8,10 +8,14 @@ It creates both the YAML configuration file and substep implementation templates
 Usage:
     python create_boids_config.py
 
+Generated files:
+    - yamls/config.yaml: Model configuration
+    - substeps/*.py: Substep implementation templates (if they don't exist)
+
 The configuration includes:
-    - 100 boids with position, velocity, and energy properties
+    - 100 boids with position/velocity properties
     - Environment bounds and flocking parameters
-    - Three main substeps: FlockingBehavior, MovementUpdate, and EnergyUpdate
+    - Two main substeps: FlockingBehavior and MovementUpdate
     - Learnable parameters for customization
 """
 
@@ -33,7 +37,6 @@ def create_boids_config():
     config = ConfigBuilder()
     
     # 1. Set simulation metadata
-    ### MODIFIED ###
     metadata = {
         "num_agents": 100,
         "num_episodes": 1,
@@ -134,7 +137,6 @@ def create_boids_config():
     flocking_substep.set_transition(flocking_transition)
     
     # 4. Create Substep 1: Movement Update
-    ### MODIFIED ###
     movement_substep = SubstepBuilderWithImpl(
         name="MovementUpdate",
         description="Update positions and handle boundaries",
@@ -161,10 +163,8 @@ def create_boids_config():
         ["position"],
         {"bounds": bounds_param}
     )
-    ### DELETED ### The energy update transition has been removed from this substep.
     movement_substep.set_transition(movement_transition)
     
-    ### NEW ###
     # 5. Create Substep 2: Energy Update
     energy_substep = SubstepBuilderWithImpl(
         name="EnergyUpdate",
@@ -205,7 +205,6 @@ def create_boids_config():
     energy_substep.set_transition(energy_transition)
     
     # 6. Add all substeps to config and generate implementations
-    ### MODIFIED ###
     config.add_substep("0", flocking_substep)
     config.add_substep("1", movement_substep)
     config.add_substep("2", energy_substep)
@@ -218,7 +217,6 @@ def create_boids_config():
     movement_files = movement_substep.generate_implementations()
     print(f"Generated files: {movement_files}")
     
-    ### NEW ###
     print("Generating energy update substep implementations...")
     energy_files = energy_substep.generate_implementations()
     print(f"Generated files: {energy_files}")
