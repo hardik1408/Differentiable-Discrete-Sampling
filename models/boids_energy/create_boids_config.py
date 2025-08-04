@@ -157,7 +157,7 @@ def create_boids_config():
     bounds_param = PropertyBuilder.create_argument(name="World bounds", value=[800.0, 600.0], shape=[2], learnable=False).config
     movement_transition.add_transition(
         "update_position", "UpdatePosition",
-        {"position": "agents/boids/position", "bounds": "environment/bounds", "velocity": "substeps/1/policy/boids/output/limited_velocity"},
+        {"position": "agents/boids/position", "bounds": "environment/bounds", "velocity": "agents/boids/velocity"},
         ["position"],
         {"bounds": bounds_param}
     )
