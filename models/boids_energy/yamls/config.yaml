@@ -1,0 +1,268 @@
+simulation_metadata:
+  calibration: false
+  device: cpu
+  num_agents: 1000
+  num_episodes: 1
+  num_steps_per_episode: 500
+  num_substeps_per_step: 3
+  population_dir: /home/hardik/Desktop/AgentTorch/agent_torch/populations/sample2
+state:
+  agents:
+    boids:
+      number: 100
+      properties:
+        energy:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: energy
+          shape:
+          - 100
+          value: 100.0
+        position:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: position
+          shape:
+          - 100
+          - 2
+          value:
+          - 400.0
+          - 300.0
+        velocity:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: velocity
+          shape:
+          - 100
+          - 2
+          value:
+          - 1.0
+          - 0.0
+  environment:
+    bounds:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: bounds
+      shape:
+      - 2
+      value:
+      - 800.0
+      - 600.0
+    energy_decay_rate:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_decay_rate
+      shape: []
+      value: 0.5
+    max_force:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: max_force
+      shape: []
+      value: 0.1
+    max_speed:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: max_speed
+      shape: []
+      value: 4.0
+    min_energy:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: min_energy
+      shape: []
+      value: 5.0
+    perception_radius:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: perception_radius
+      shape: []
+      value: 50.0
+    separation_distance:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: separation_distance
+      shape: []
+      value: 25.0
+  network: {}
+  objects: null
+substeps:
+  '0':
+    active_agents:
+    - boids
+    description: Calculate flocking forces (separation, alignment, cohesion)
+    name: FlockingBehavior
+    observation:
+      boids: null
+    policy:
+      boids:
+        calculate_flocking_forces:
+          arguments:
+            alignment_weight:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Alignment weight
+              shape:
+              - 1
+              value: 1.0
+            cohesion_weight:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Cohesion weight
+              shape:
+              - 1
+              value: 1.0
+            position_margin:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Position margin
+              shape:
+              - 1
+              value: 50.0
+            separation_weight:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Separation weight
+              shape:
+              - 1
+              value: 1.5
+            speed_range:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Speed range
+              shape:
+              - 2
+              value:
+              - 0.5
+              - 1.5
+          generator: CalculateFlockingForces
+          input_variables:
+            perception_radius: environment/perception_radius
+            position: agents/boids/position
+            separation_distance: environment/separation_distance
+            velocity: agents/boids/velocity
+          output_variables:
+          - steering_force
+    reward: null
+    transition:
+      update_velocity:
+        arguments:
+          max_force:
+            dtype: float
+            initialization_function: null
+            learnable: true
+            name: Max force
+            shape:
+            - 1
+            value: 0.1
+        generator: UpdateVelocity
+        input_variables:
+          max_force: environment/max_force
+          velocity: agents/boids/velocity
+        output_variables:
+        - velocity
+  '1':
+    active_agents:
+    - boids
+    description: Update positions and handle boundaries
+    name: MovementUpdate
+    observation:
+      boids: null
+    policy:
+      boids:
+        limit_speed:
+          arguments:
+            max_speed:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Max speed
+              shape:
+              - 1
+              value: 4.0
+          generator: LimitSpeed
+          input_variables:
+            max_speed: environment/max_speed
+            velocity: agents/boids/velocity
+          output_variables:
+          - limited_velocity
+    reward: null
+    transition:
+      update_position:
+        arguments:
+          bounds:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: World bounds
+            shape:
+            - 2
+            value:
+            - 800.0
+            - 600.0
+        generator: UpdatePosition
+        input_variables:
+          bounds: environment/bounds
+          position: agents/boids/position
+          velocity: substeps/1/policy/boids/output/limited_velocity
+        output_variables:
+        - position
+  '2':
+    active_agents:
+    - boids
+    description: Update boid energy based on movement
+    name: EnergyUpdate
+    observation:
+      boids: null
+    policy:
+      boids:
+        check_min_energy:
+          arguments:
+            min_energy:
+              dtype: float
+              initialization_function: null
+              learnable: true
+              name: Min energy
+              shape:
+              - 1
+              value: 5.0
+          generator: CheckMinEnergy
+          input_variables:
+            energy: agents/boids/energy
+            min_energy: environment/min_energy
+          output_variables:
+          - min_energy_check
+    reward: null
+    transition:
+      update_energy:
+        arguments:
+          energy_decay_rate:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Energy decay rate
+            shape:
+            - 1
+            value: 0.5
+        generator: UpdateEnergy
+        input_variables:
+          energy: agents/boids/energy
+          energy_decay_rate: environment/energy_decay_rate
+          velocity: agents/boids/velocity
+        output_variables:
+        - energy
