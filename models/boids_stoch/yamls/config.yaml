@@ -1,0 +1,299 @@
+simulation_metadata:
+  calibration: false
+  device: cpu
+  num_agents: 1000
+  num_episodes: 1
+  num_steps_per_episode: 300
+  num_substeps_per_step: 4
+  population_dir: /home/hardik/Desktop/AgentTorch/agent_torch/populations/sample2
+state:
+  agents:
+    boids:
+      number: 100
+      properties:
+        alive_status:
+          dtype: bool
+          initialization_function: null
+          learnable: false
+          name: alive_status
+          shape:
+          - 100
+          value: true
+        area_covered_metric:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: area_covered_metric
+          shape:
+          - 100
+          value: 0.0
+        energy:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: energy
+          shape:
+          - 100
+          value: 100.0
+        has_transferred_energy:
+          dtype: bool
+          initialization_function: null
+          learnable: false
+          name: has_transferred_energy
+          shape:
+          - 100
+          value: false
+        position:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: position
+          shape:
+          - 100
+          - 2
+          value:
+          - 15
+          - 15
+  environment:
+    energy_death_threshold:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_death_threshold
+      shape: []
+      value: 5.0
+    energy_decay_per_move:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_decay_per_move
+      shape: []
+      value: 2.0
+    energy_decay_per_stay:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_decay_per_stay
+      shape: []
+      value: 0.0
+    energy_transfer_percentage:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_transfer_percentage
+      shape: []
+      value: 0.1
+    energy_transfer_radius:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: energy_transfer_radius
+      shape: []
+      value: 5.0
+    grid_size:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: grid_size
+      shape:
+      - 2
+      value:
+      - 100
+      - 100
+    min_energy_diff:
+      dtype: float
+      initialization_function: null
+      learnable: false
+      name: min_energy_diff
+      shape: []
+      value: 35.0
+  network: {}
+  objects: null
+substeps:
+  '0':
+    active_agents:
+    - boids
+    description: Handle energy transfer between nearby boids
+    name: EnergySharing
+    observation:
+      boids: null
+    policy:
+      boids:
+        identify_energy_transfers:
+          arguments:
+            max_transfers_per_boid:
+              dtype: float
+              initialization_function: null
+              learnable: false
+              name: Maximum transfers per boid per step
+              shape:
+              - 1
+              value: 10
+          generator: IdentifyEnergyTransfers
+          input_variables:
+            alive_status: agents/boids/alive_status
+            energy: agents/boids/energy
+            energy_transfer_radius: environment/energy_transfer_radius
+            min_energy_diff: environment/min_energy_diff
+            position: agents/boids/position
+          output_variables:
+          - energy_transfers_list
+    reward: null
+    transition:
+      execute_energy_transfers:
+        arguments:
+          transfer_percentage:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Energy transfer percentage
+            shape:
+            - 1
+            value: 0.1
+        generator: ExecuteEnergyTransfers
+        input_variables:
+          alive_status: agents/boids/alive_status
+          energy: agents/boids/energy
+          energy_transfer_percentage: environment/energy_transfer_percentage
+          has_transferred_energy: agents/boids/has_transferred_energy
+        output_variables:
+        - energy
+        - has_transferred_energy
+  '1':
+    active_agents:
+    - boids
+    description: Decide next movement action using probabilities
+    name: MovementDecision
+    observation:
+      boids: null
+    policy:
+      boids:
+        calculate_movement_probabilities:
+          arguments:
+            base_move_prob:
+              dtype: float
+              initialization_function: null
+              learnable: false
+              name: Base movement probability
+              shape:
+              - 1
+              value: 0.2
+            boundary_avoidance:
+              dtype: float
+              initialization_function: null
+              learnable: false
+              name: Boundary avoidance factor
+              shape:
+              - 1
+              value: 0.8
+            low_energy_stay_bonus:
+              dtype: float
+              initialization_function: null
+              learnable: false
+              name: Stay bonus for low energy
+              shape:
+              - 1
+              value: 0.4
+          generator: CalculateMovementProbabilities
+          input_variables:
+            alive_status: agents/boids/alive_status
+            energy: agents/boids/energy
+            grid_size: environment/grid_size
+            position: agents/boids/position
+          output_variables:
+          - movement_probabilities
+    reward: null
+    transition:
+      sample_movement_action:
+        arguments:
+          random_seed_offset:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Random seed offset
+            shape:
+            - 1
+            value: 42
+        generator: SampleMovementAction
+        input_variables:
+          alive_status: agents/boids/alive_status
+          grid_size: environment/grid_size
+          position: agents/boids/position
+        output_variables:
+        - position
+  '2':
+    active_agents:
+    - boids
+    description: Apply energy costs and handle deaths
+    name: EnergyDecayAndDeath
+    observation:
+      boids: null
+    policy:
+      boids: null
+    reward: null
+    transition:
+      apply_energy_decay_and_death:
+        arguments:
+          death_threshold:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Death energy threshold
+            shape:
+            - 1
+            value: 5.0
+          move_energy_cost:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Energy cost for movement
+            shape:
+            - 1
+            value: 2.0
+          stay_energy_cost:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Energy cost for staying
+            shape:
+            - 1
+            value: 0.5
+        generator: ApplyEnergyDecayAndDeath
+        input_variables:
+          alive_status: agents/boids/alive_status
+          energy: agents/boids/energy
+          energy_death_threshold: environment/energy_death_threshold
+          energy_decay_per_move: environment/energy_decay_per_move
+          energy_decay_per_stay: environment/energy_decay_per_stay
+          position: agents/boids/position
+        output_variables:
+        - energy
+        - alive_status
+  '3':
+    active_agents:
+    - boids
+    description: Calculate area coverage and survival metrics
+    name: MetricsCalculation
+    observation:
+      boids: null
+    policy:
+      boids: null
+    reward: null
+    transition:
+      update_simulation_metrics:
+        arguments:
+          coverage_decay:
+            dtype: float
+            initialization_function: null
+            learnable: false
+            name: Coverage decay factor
+            shape:
+            - 1
+            value: 0.99
+        generator: UpdateSimulationMetrics
+        input_variables:
+          alive_status: agents/boids/alive_status
+          area_covered_metric: agents/boids/area_covered_metric
+          position: agents/boids/position
+        output_variables:
+        - area_covered_metric
