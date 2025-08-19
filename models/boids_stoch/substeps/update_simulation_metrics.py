@@ -14,21 +14,28 @@ class UpdateSimulationMetrics(SubstepTransition):
     
     def forward(self, state: Dict[str, Any], action) -> Dict[str, Any]:
         input_variables = self.input_variables
-        
+
         position = get_var(state, input_variables["position"])
         alive_status = get_var(state, input_variables["alive_status"])
-        
         if "covered_positions_set" not in state:
             state["covered_positions_set"] = set()
-        
+
         for i in range(len(position)):
-            if alive_status[i]:
-                pos_tuple = (position[i, 0].item(), position[i, 1].item())
+            if bool(alive_status[i]):  
+                pos_tuple = (
+                    int(position[i, 0].detach().item()),
+                    int(position[i, 1].detach().item())
+                )
                 state["covered_positions_set"].add(pos_tuple)
-        
+
         area_covered_count = len(state["covered_positions_set"])
-        area_covered_tensor = torch.full_like(alive_status, area_covered_count, dtype=torch.float32)
-        
+        area_covered_tensor = torch.full(
+            alive_status.shape,
+            float(area_covered_count),
+            dtype=torch.float32,
+            device=alive_status.device
+        )
+
         return {
             self.output_variables[0]: area_covered_tensor
         }

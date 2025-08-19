@@ -13,6 +13,7 @@ class IdentifyEnergyTransfers(SubstepAction):
     def forward(self, state: Dict[str, Any], observations) -> Dict[str, Any]:
         position = get_var(state, self.input_variables["position"])
         energy = get_var(state, self.input_variables["energy"])
+        print(energy)
         alive_status = get_var(state, self.input_variables["alive_status"])
         energy_transfer_radius = get_var(state, self.input_variables["energy_transfer_radius"])
         min_energy_diff = get_var(state, self.input_variables["min_energy_diff"])
@@ -20,20 +21,22 @@ class IdentifyEnergyTransfers(SubstepAction):
         energy_transfers_list = []
         
         for i in range(len(position)):
-            if not alive_status[i]:
+            if not bool(alive_status[i]):   # ensure tensor -> Python bool
                 continue
                 
             transfers_made = 0
             for j in range(len(position)):
-                if i == j or not alive_status[j] or transfers_made >= self.max_transfers_per_boid:
+                if i == j or not bool(alive_status[j]) or transfers_made >= self.max_transfers_per_boid:
                     continue
                 
                 distance = torch.norm(position[i].float() - position[j].float(), p=1)
                 energy_diff = energy[i] - energy[j]
                 
-                if distance <= energy_transfer_radius and energy_diff >= min_energy_diff:
+                # use .item() only for branching logic
+                if distance.item() <= energy_transfer_radius.item() and energy_diff.item() >= min_energy_diff.item():
                     energy_transfers_list.append((i, j, energy_diff))
                     transfers_made += 1
+
         return {
             self.output_variables[0]: energy_transfers_list
         }

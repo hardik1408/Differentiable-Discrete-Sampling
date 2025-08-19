@@ -30,16 +30,16 @@ class CalculateMovementProbabilities(SubstepAction):
             probs = torch.ones(5) * self.base_move_prob
             
             if energy[i] <= 30:
-                probs[4] += self.low_energy_stay_bonus  # stay bonus
+                probs[4] = probs[4] + self.low_energy_stay_bonus  # stay bonus
             
             if x <= 0:
-                probs[0] *= (1 - self.boundary_avoidance)  # left
+                probs[0] = probs[0]*(1 - self.boundary_avoidance)  # left
             if x >= grid_size[0] - 1:
-                probs[1] *= (1 - self.boundary_avoidance)  # right
+                probs[1] = probs[1]*(1 - self.boundary_avoidance)  # right
             if y <= 0:
-                probs[2] *= (1 - self.boundary_avoidance)  # up
+                probs[2] =probs[2]*(1 - self.boundary_avoidance)  # up
             if y >= grid_size[1] - 1:
-                probs[3] *= (1 - self.boundary_avoidance)  # down
+                probs[3] = probs[3]*(1 - self.boundary_avoidance)  # down
             
             probs = probs / torch.sum(probs)
             movement_probabilities[i] = probs

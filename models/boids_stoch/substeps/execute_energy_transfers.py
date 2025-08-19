@@ -14,24 +14,35 @@ class ExecuteEnergyTransfers(SubstepTransition):
     
     def forward(self, state: Dict[str, Any], action) -> Dict[str, Any]:
         input_variables = self.input_variables
-        
-        energy = get_var(state, input_variables["energy"])
-        alive_status = get_var(state, input_variables["alive_status"])
+
+        energy = get_var(state, input_variables["energy"])                    
+        alive_status = get_var(state, input_variables["alive_status"])       
         energy_transfer_percentage = get_var(state, input_variables["energy_transfer_percentage"])
-        
-        energy_transfers_list = action["boids"]["energy_transfers_list"]
-        
-        new_energy = energy.clone()
+        energy_transfers_list = action["boids"]["energy_transfers_list"]     
+        if len(energy_transfers_list) == 0:
+            return {
+                self.output_variables[0]: energy,
+                self.output_variables[1]: torch.zeros_like(alive_status, dtype=torch.bool)
+            }
+
+        transfers = torch.tensor(energy_transfers_list, device=energy.device, dtype=energy.dtype)
+        donor_idx = transfers[:, 0].long()
+        recipient_idx = transfers[:, 1].long()
+        energy_diff = transfers[:, 2]
+
+        valid_mask = alive_status[donor_idx] & alive_status[recipient_idx]
+        transfer_amounts = energy_diff * energy_transfer_percentage * valid_mask.to(energy.dtype)
+
+        updates = torch.zeros_like(energy)
+
+        updates.index_add_(0, donor_idx, -transfer_amounts)
+        updates.index_add_(0, recipient_idx, transfer_amounts)
+
+        new_energy = energy + updates
+
         has_transferred = torch.zeros_like(alive_status, dtype=torch.bool)
-        
-        for transfer in energy_transfers_list:
-            donor_idx, recipient_idx, energy_diff = transfer
-            if alive_status[donor_idx] and alive_status[recipient_idx]:
-                transfer_amount = energy_diff * energy_transfer_percentage
-                new_energy[donor_idx] -= transfer_amount
-                new_energy[recipient_idx] += transfer_amount
-                has_transferred[donor_idx] = True
-        
+        has_transferred.index_fill_(0, donor_idx[valid_mask], True)
+
         return {
             self.output_variables[0]: new_energy,
             self.output_variables[1]: has_transferred
